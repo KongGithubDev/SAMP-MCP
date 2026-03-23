@@ -19,7 +19,7 @@ export class PawnManager {
         }
     }
 
-    async detectFromRoot(root: string): Promise<{ port: number, password?: string }> {
+    async detectFromRoot(root: string): Promise<{ port: number, host?: string, password?: string }> {
         this.serverRoot = path.resolve(root);
 
         // Auto-detect server exe
@@ -44,9 +44,11 @@ export class PawnManager {
         const config = await this.readConfig();
         const portMatch = config.match(/^port\s+(\d+)/m);
         const passMatch = config.match(/^rcon_password\s+(.+)/m);
+        const bindMatch = config.match(/^bind\s+(.+)/m);
 
         return {
             port: portMatch ? parseInt(portMatch[1], 10) : 7777,
+            host: bindMatch ? bindMatch[1].trim() : undefined,
             password: passMatch ? passMatch[1].trim() : undefined
         };
     }
@@ -641,7 +643,7 @@ export class PawnManager {
         return issues;
     }
 
-    async checkMcpUpdate(current: string = "1.0.0"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
+    async checkMcpUpdate(current: string = "1.0.4"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
         try {
             const { stdout } = await execPromise('npm view samp-mcp version');
             const latest = stdout.trim();

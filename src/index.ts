@@ -8,7 +8,7 @@ import { PawnManager } from './scripts.js';
 
 dotenv.config();
 
-const APP_VERSION = "1.0.3";
+const APP_VERSION = "1.0.4";
 
 const server = new McpServer({
   name: "samp-mcp-server",
@@ -18,8 +18,9 @@ const server = new McpServer({
 let client: SampClient | null = null;
 const pawn = new PawnManager();
 
-async function updateConnection(root: string, host: string, portOverride?: number, passOverride?: string) {
+async function updateConnection(root: string, hostOverride?: string, portOverride?: number, passOverride?: string) {
     const detected = await pawn.detectFromRoot(root);
+    const host = hostOverride || detected.host || '127.0.0.1';
     const port = portOverride || detected.port;
     const password = passOverride || detected.password;
     
@@ -32,12 +33,15 @@ async function updateConnection(root: string, host: string, portOverride?: numbe
 server.tool(
   "set_server_root",
   "Point the MCP server to a SAMP project directory. Automatically detects config and tracks the project.",
-  { path: z.string().describe("Absolute path to the SAMP server root directory") },
-  async ({ path }) => {
+  { 
+    path: z.string().describe("Absolute path to the SAMP server root directory"),
+    host: z.string().optional().describe("Override server IP (defaults to bind in server.cfg or 127.0.0.1)")
+  },
+  async ({ path, host }) => {
     try {
-      const info = await updateConnection(path, '127.0.0.1');
+      const info = await updateConnection(path, host);
       return {
-        content: [{ type: "text", text: `Successfully connected to ${path}. detected port: ${info.port}` }]
+        content: [{ type: "text", text: `Successfully connected to ${path}. Host: ${client?.host}, Port: ${info.port}` }]
       };
     } catch (error: any) {
       return {

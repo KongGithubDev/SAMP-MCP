@@ -4,7 +4,7 @@ import { SampProtocol, PacketType } from './protocol.js';
 export class SampClient {
     private socket: dgram.Socket;
 
-    constructor(private host: string, private port: number, private password?: string) {
+    constructor(public host: string, public port: number, public password?: string) {
         this.socket = dgram.createSocket('udp4');
     }
 
