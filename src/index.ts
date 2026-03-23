@@ -8,9 +8,11 @@ import { PawnManager } from './scripts.js';
 
 dotenv.config();
 
+const APP_VERSION = "1.0.2";
+
 const server = new McpServer({
   name: "samp-mcp-server",
-  version: "1.0.1"
+  version: APP_VERSION
 });
 
 let client: SampClient | null = null;
@@ -777,19 +779,7 @@ server.tool(
   }
 );
 
-// Tool: Check For Updates
-server.tool(
-  "check_for_updates",
-  "Check if a newer version of SAMP-MCP is available on NPM.",
-  {},
-  async () => {
-    const current = "1.3.0";
-    const latest = "1.3.0"; // Placeholder for future 
-    return {
-      content: [{ type: "text", text: `Current Version: ${current}\nLatest Version: ${latest}\n${current === latest ? "You are up to date!" : "A new version is available! Run 'npm update -g samp-mcp' to upgrade."}` }]
-    };
-  }
-);
+
 
 // Tool: Install Plugin
 server.tool(
@@ -930,7 +920,7 @@ server.tool(
   {},
   async () => {
     try {
-      const info = await pawn.checkMcpUpdate();
+      const info = await pawn.checkMcpUpdate(APP_VERSION);
       if (info.needsUpdate) {
         return {
           content: [{ type: "text", text: `A new version of SAMP-MCP is available!\nCurrent: ${info.current}\nLatest: ${info.latest}\n\nUse 'update_mcp_server' to update.` }]
