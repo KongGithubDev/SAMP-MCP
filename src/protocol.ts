@@ -7,13 +7,14 @@ export class SampProtocol {
 
     static buildPacket(ip: string, port: number, type: PacketType, payload?: Buffer): Buffer {
         const ipParts = ip.split('.').map(p => parseInt(p, 10));
-        const header = Buffer.concat([
-            this.HEADER,
-            Buffer.from(ipParts),
-            Buffer.alloc(2)
-        ]);
-        header.writeUInt16LE(port, 6);
-        header.write(type, 8);
+        const header = Buffer.alloc(11);
+        header.write('SAMP');
+        header.writeUInt8(ipParts[0], 4);
+        header.writeUInt8(ipParts[1], 5);
+        header.writeUInt8(ipParts[2], 6);
+        header.writeUInt8(ipParts[3], 7);
+        header.writeUInt16LE(port, 8);
+        header.write(type, 10);
 
         if (payload) {
             return Buffer.concat([header, payload]);

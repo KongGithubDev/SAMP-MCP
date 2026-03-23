@@ -8,7 +8,7 @@ import { PawnManager } from './scripts.js';
 
 dotenv.config();
 
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "1.0.3";
 
 const server = new McpServer({
   name: "samp-mcp-server",

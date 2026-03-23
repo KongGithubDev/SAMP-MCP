@@ -12,7 +12,7 @@ export class SampClient {
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 reject(new Error('SAMP Query Timeout'));
-            }, 2000);
+            }, 5000);
 
             const packet = SampProtocol.buildPacket(this.host, this.port, type, payload);
             
