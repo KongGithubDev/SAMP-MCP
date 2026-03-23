@@ -923,6 +923,51 @@ server.tool(
   }
 );
 
+// Tool: Check for Updates
+server.tool(
+  "check_for_updates",
+  "Check if a new version of SAMP-MCP is available on NPM.",
+  {},
+  async () => {
+    try {
+      const info = await pawn.checkMcpUpdate();
+      if (info.needsUpdate) {
+        return {
+          content: [{ type: "text", text: `A new version of SAMP-MCP is available!\nCurrent: ${info.current}\nLatest: ${info.latest}\n\nUse 'update_mcp_server' to update.` }]
+        };
+      }
+      return {
+        content: [{ type: "text", text: `SAMP-MCP is up to date (v${info.current}).` }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Update MCP Server
+server.tool(
+  "update_mcp_server",
+  "Perform a self-update of the SAMP-MCP server via NPM.",
+  {},
+  async () => {
+    try {
+      const msg = await pawn.updateMcpServer();
+      return {
+        content: [{ type: "text", text: msg }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
 async function main() {
   // Try immediate init if env is present
   const root = process.env.SAMP_SERVER_ROOT;

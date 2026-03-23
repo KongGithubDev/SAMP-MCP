@@ -86,7 +86,14 @@ Once initialized, tell the AI agent:
 | `install_include` | Download and install .inc libraries from URL |
 | `install_plugin` | Install .dll/.so plugins and update server.cfg |
 | `generate_docs` | Generate markdown documentation for the project |
-| `create_deployment` | Package server files for distribution |
+| `create_deployment` | Batch copy all necessary server files for distribution |
+
+### Meta
+
+| Command | Description |
+|---|---|
+| `check_for_updates` | Check if a new version of SAMP-MCP is available on NPM |
+| `update_mcp_server` | Perform a self-update of the server via NPM |
 
 ---
 

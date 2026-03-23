@@ -640,6 +640,30 @@ export class PawnManager {
 
         return issues;
     }
+
+    async checkMcpUpdate(): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
+        const current = "1.0.0"; 
+        try {
+            const { stdout } = await execPromise('npm view samp-mcp version');
+            const latest = stdout.trim();
+            return {
+                current,
+                latest,
+                needsUpdate: latest !== current
+            };
+        } catch (e) {
+            return { current, latest: current, needsUpdate: false };
+        }
+    }
+
+    async updateMcpServer(): Promise<string> {
+        try {
+            await execPromise('npm install -g samp-mcp');
+            return "SAMP-MCP has been updated to the latest version. Please restart your MCP client.";
+        } catch (error: any) {
+            throw new Error(`Update failed: ${error.message}`);
+        }
+    }
 }
 
 
