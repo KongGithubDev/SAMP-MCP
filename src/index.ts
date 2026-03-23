@@ -10,7 +10,7 @@ dotenv.config();
 
 const server = new McpServer({
   name: "samp-mcp-server",
-  version: "1.0.0"
+  version: "1.0.1"
 });
 
 let client: SampClient | null = null;

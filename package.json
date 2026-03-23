@@ -1,11 +1,11 @@
 {
   "name": "samp-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "An MCP server for Managing SAMP (San Andreas Multiplayer) servers with Thai (Windows-874) support.",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
-    "samp-mcp": "./dist/index.js"
+    "samp-mcp": "dist/index.js"
   },
   "files": [
     "dist",
