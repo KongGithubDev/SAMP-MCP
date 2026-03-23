@@ -21,7 +21,7 @@ export class PawnManager {
 
     async detectFromRoot(root: string): Promise<{ port: number, password?: string }> {
         this.serverRoot = path.resolve(root);
-        
+
         // Auto-detect server exe
         const exePath = path.join(this.serverRoot, 'samp-server.exe');
         try {
@@ -30,7 +30,7 @@ export class PawnManager {
         } catch (e) {
             // Might be Linux?
             const linuxExe = path.join(this.serverRoot, 'samp03svr');
-            try { await fs.access(linuxExe); this.serverExePath = linuxExe; } catch {}
+            try { await fs.access(linuxExe); this.serverExePath = linuxExe; } catch { }
         }
 
         // Auto-detect pawncc
@@ -38,7 +38,7 @@ export class PawnManager {
         try {
             await fs.access(pccPath);
             this.pawnccPath = pccPath;
-        } catch (e) {}
+        } catch (e) { }
 
         // Parse server.cfg
         const config = await this.readConfig();
@@ -55,17 +55,17 @@ export class PawnManager {
     async readScript(filePath: string, encoding: string = 'windows-874'): Promise<string> {
         const fullPath = path.isAbsolute(filePath) ? filePath : path.join(this.serverRoot, filePath);
         const buffer = await fs.readFile(fullPath);
-        
+
         if (encoding === 'auto') {
             try {
                 // Check if it's valid UTF-8
                 const utf8Str = buffer.toString('utf8');
                 const isUtf8 = Buffer.from(utf8Str, 'utf8').equals(buffer);
                 if (isUtf8) return utf8Str;
-            } catch {}
+            } catch { }
             return iconv.decode(buffer, 'windows-874');
         }
-        
+
         return iconv.decode(buffer, encoding);
     }
 
@@ -148,13 +148,13 @@ export class PawnManager {
     async updateConfig(key: string, value: string): Promise<void> {
         let content = await this.readConfig();
         const regex = new RegExp(`^${key}\\s+.+`, 'm');
-        
+
         if (regex.test(content)) {
             content = content.replace(regex, `${key} ${value}`);
         } else {
             content += `\n${key} ${value}`;
         }
-        
+
         await this.writeConfig(content);
     }
 
@@ -193,7 +193,7 @@ export class PawnManager {
             try {
                 const files = await fs.readdir(p);
                 allFiles = allFiles.concat(files.filter(f => f.endsWith('.inc')));
-            } catch {}
+            } catch { }
         }
         return [...new Set(allFiles)];
     }
@@ -209,7 +209,7 @@ export class PawnManager {
             try {
                 const buffer = await fs.readFile(p);
                 return iconv.decode(buffer, 'windows-874');
-            } catch {}
+            } catch { }
         }
         throw new Error(`Include file ${name} not found in common paths.`);
     }
@@ -234,7 +234,7 @@ export class PawnManager {
             patterns.hasSampctl = true;
             const pawnJson = JSON.parse(await fs.readFile(path.join(this.serverRoot, 'pawn.json'), 'utf8'));
             if (pawnJson.runtime?.version) patterns.version = pawnJson.runtime.version;
-        } catch {}
+        } catch { }
 
         // Check for common dependencies in pawno/include
         const includes = await this.listIncludes();
@@ -249,14 +249,14 @@ export class PawnManager {
             const config = await this.readConfig();
             if (config.includes('mysql')) patterns.hasMySQL = true;
             if (config.includes('streamer')) patterns.hasStreamer = true;
-        } catch {}
+        } catch { }
 
         return patterns;
     }
 
     async inspectProject(): Promise<any> {
         if (!this.serverRoot) return { error: "No root set" };
-        
+
         let totalLines = 0;
         let commandCount = 0;
         let dialogCount = 0;
@@ -277,7 +277,7 @@ export class PawnManager {
                         totalLines += lines.length;
                         commandCount += (content.match(/CMD:|PCMD:|YCMD:/g) || []).length;
                         dialogCount += (content.match(/Dialog:|ShowPlayerDialog/g) || []).length;
-                    } catch {}
+                    } catch { }
                 }
             }
         };
@@ -327,7 +327,7 @@ export class PawnManager {
 
     async generateDocs(): Promise<string> {
         if (!this.serverRoot) return "No root set";
-        
+
         let docs = "# SAMP Server Project Documentation\n\n";
         const commands: string[] = [];
         const dialogs: string[] = [];
@@ -344,10 +344,10 @@ export class PawnManager {
                         const content = await this.readScript(fullPath);
                         const cmdMatches = content.match(/(CMD|PCMD|YCMD|Y_COMMAND):(\w+)\(([^)]+)\)/g) || [];
                         cmdMatches.forEach(m => commands.push(`- \`${m}\` (in ${item})` || ''));
-                        
+
                         const dialogMatches = content.match(/Dialog:(\w+)\(([^)]+)\)/g) || [];
                         dialogMatches.forEach(m => dialogs.push(`- \`${m}\` (in ${item})` || ''));
-                    } catch {}
+                    } catch { }
                 }
             }
         };
@@ -362,7 +362,7 @@ export class PawnManager {
 
     async checkIncludes(): Promise<any[]> {
         if (!this.serverRoot) return [];
-        
+
         const missing: any[] = [];
         const existingIncludes = await this.listIncludes();
         const existingNames = existingIncludes.map(f => f.toLowerCase());
@@ -384,7 +384,7 @@ export class PawnManager {
                                 missing.push({ file: item, include: name });
                             }
                         }
-                    } catch {}
+                    } catch { }
                 }
             }
         };
@@ -397,18 +397,18 @@ export class PawnManager {
         const content = await this.readScript(scriptPath);
         const lines = content.split('\n');
         const shadowing: any[] = [];
-        
+
         // Simplified detection for common shadowing: playerid redefined in loop or function
         lines.forEach((line, index) => {
             if (line.match(/for\(.*new\s+playerid\s*=/) || line.match(/new\s+playerid\s*;/)) {
                 if (content.includes('OnPlayerConnect(playerid)') || content.includes('OnPlayerDisconnect(playerid)')) {
-                   // This is very subjective, but let's flag obvious re-declarations
-                   shadowing.push({
-                       line: index + 1,
-                       variable: "playerid",
-                       message: "Possible shadowing of 'playerid'. Redefining global/callback parameters can cause bugs.",
-                       content: line.trim()
-                   });
+                    // This is very subjective, but let's flag obvious re-declarations
+                    shadowing.push({
+                        line: index + 1,
+                        variable: "playerid",
+                        message: "Possible shadowing of 'playerid'. Redefining global/callback parameters can cause bugs.",
+                        content: line.trim()
+                    });
                 }
             }
         });
@@ -418,19 +418,19 @@ export class PawnManager {
 
     async injectCode(code: string): Promise<string> {
         if (!this.serverRoot) return "No root set";
-        
+
         const fsDir = path.join(this.serverRoot, 'filterscripts');
-        try { await fs.mkdir(fsDir, { recursive: true }); } catch {}
-        
+        try { await fs.mkdir(fsDir, { recursive: true }); } catch { }
+
         const scriptPath = path.join(fsDir, 'mcp_test.pwn');
         const scriptContent = `#include <a_samp>\n#include <YSI_Coding\\y_hooks>\n\npublic OnFilterScriptInit()\n{\n    print("--- MCP Live Injection Started ---");\n    ${code}\n    return 1;\n}`;
-        
+
         await this.writeScript(scriptPath, scriptContent);
-        
+
         // Compile
         const result = await this.compilePawn(scriptPath);
         if (!result.success) throw new Error(`Compression failed:\n${JSON.stringify(result.errors)}`);
-        
+
         // Load via RCON
         await this.manageServer('restart'); // Just to be sure, or we can loadfs
         // Actually best is loadfs
@@ -458,41 +458,41 @@ export class PawnManager {
 
     async createDeployment(outputDir: string): Promise<string> {
         if (!this.serverRoot) return "No root set";
-        
+
         const absOutputDir = path.resolve(outputDir);
         await fs.mkdir(absOutputDir, { recursive: true });
-        
+
         const itemsToCopy = ['plugins', 'scriptfiles', 'npcmodes', 'server.cfg'];
         for (const item of itemsToCopy) {
             const src = path.join(this.serverRoot, item);
             const dest = path.join(absOutputDir, item);
             try {
-               await fs.cp(src, dest, { recursive: true });
-            } catch {}
+                await fs.cp(src, dest, { recursive: true });
+            } catch { }
         }
 
         // Copy all .amx from gamemodes and filterscripts
         const copyAmx = async (dir: string, sub: string) => {
-           const srcDir = path.join(this.serverRoot, dir);
-           const destDir = path.join(absOutputDir, dir);
-           await fs.mkdir(destDir, { recursive: true });
-           const files = await fs.readdir(srcDir);
-           for (const f of files) {
-               if (f.endsWith('.amx')) {
-                   await fs.copyFile(path.join(srcDir, f), path.join(destDir, f));
-               }
-           }
+            const srcDir = path.join(this.serverRoot, dir);
+            const destDir = path.join(absOutputDir, dir);
+            await fs.mkdir(destDir, { recursive: true });
+            const files = await fs.readdir(srcDir);
+            for (const f of files) {
+                if (f.endsWith('.amx')) {
+                    await fs.copyFile(path.join(srcDir, f), path.join(destDir, f));
+                }
+            }
         };
 
-        try { await copyAmx('gamemodes', ''); } catch {}
-        try { await copyAmx('filterscripts', ''); } catch {}
-        
+        try { await copyAmx('gamemodes', ''); } catch { }
+        try { await copyAmx('filterscripts', ''); } catch { }
+
         // Copy server executables if they exist
         const exes = ['samp-server.exe', 'samp-npc.exe', 'announce.exe'];
         for (const exe of exes) {
             try {
                 await fs.copyFile(path.join(this.serverRoot, exe), path.join(absOutputDir, exe));
-            } catch {}
+            } catch { }
         }
 
         return `Deployment package created at ${absOutputDir}`;
@@ -500,19 +500,19 @@ export class PawnManager {
 
     async installInclude(url: string, name: string): Promise<string> {
         if (!this.serverRoot) return "No root set";
-        
+
         const includeDir = path.join(this.serverRoot, 'pawno', 'include');
-        try { await fs.mkdir(includeDir, { recursive: true }); } catch {}
-        
+        try { await fs.mkdir(includeDir, { recursive: true }); } catch { }
+
         const dest = path.join(includeDir, name.endsWith('.inc') ? name : `${name}.inc`);
-        
+
         // Using fetch (available in Node 18+)
         const response = await fetch(url);
         if (!response.ok) throw new Error(`Failed to download: ${response.statusText}`);
-        
+
         const content = await response.text();
         await fs.writeFile(dest, content, 'utf8'); // Most includes are UTF-8 or ASCII
-        
+
         return `Successfully installed ${name} to ${dest}`;
     }
 
@@ -520,10 +520,10 @@ export class PawnManager {
         const content = await this.readScript(scriptPath);
         const lines = content.split('\n');
         const strings: any[] = [];
-        
+
         // Match string literals
         const regex = /"(.*?)"/g;
-        
+
         lines.forEach((line, index) => {
             let match;
             while ((match = regex.exec(line)) !== null) {
@@ -541,11 +541,11 @@ export class PawnManager {
 
     async getDashboard(client: any): Promise<any> {
         if (!this.serverRoot) return { error: "No root set" };
-        
+
         const info = await client.getInfo();
         const players = await client.getPlayers();
         const rules = await client.getRules();
-        
+
         let avgPing = 0;
         if (players.length > 0) {
             avgPing = players.reduce((acc: number, p: any) => acc + (p.ping || 0), 0) / players.length;
@@ -565,26 +565,26 @@ export class PawnManager {
 
     async installPlugin(url: string, name: string): Promise<string> {
         if (!this.serverRoot) return "No root set";
-        
+
         const pluginDir = path.join(this.serverRoot, 'plugins');
-        try { await fs.mkdir(pluginDir, { recursive: true }); } catch {}
-        
+        try { await fs.mkdir(pluginDir, { recursive: true }); } catch { }
+
         const isWindows = process.platform === 'win32';
         const ext = isWindows ? '.dll' : '.so';
         const fileName = name.endsWith(ext) ? name : `${name}${ext}`;
         const dest = path.join(pluginDir, fileName);
-        
+
         const response = await fetch(url);
         if (!response.ok) throw new Error(`Failed to download plugin: ${response.statusText}`);
-        
+
         const buffer = Buffer.from(await response.arrayBuffer());
         await fs.writeFile(dest, buffer);
-        
+
         // Update server.cfg
         let config = await this.readConfig();
         const pluginsLineMatch = config.match(/^plugins\s+(.*)/m);
         const pluginNameOnly = fileName.replace(ext, '');
-        
+
         if (pluginsLineMatch) {
             const currentPlugins = pluginsLineMatch[1].split(/\s+/);
             if (!currentPlugins.includes(pluginNameOnly)) {
@@ -593,9 +593,9 @@ export class PawnManager {
         } else {
             config += `\nplugins ${pluginNameOnly}`;
         }
-        
+
         await this.writeConfig(config);
-        
+
         return `Successfully installed plugin ${fileName} and updated server.cfg.`;
     }
 
@@ -603,7 +603,7 @@ export class PawnManager {
         const content = await this.readScript(scriptPath);
         const lines = content.split('\n');
         const issues: any[] = [];
-        
+
         lines.forEach((line, index) => {
             // Check for fast timers
             const timerMatch = line.match(/SetTimer\(.*,\s*(\d+),/);
@@ -629,7 +629,7 @@ export class PawnManager {
             // Check for large loops
             const loopMatch = line.match(/for\(.*MAX_PLAYERS.*\)/);
             if (loopMatch && (line.includes('OnPlayerUpdate') || line.includes('OnUpdate'))) {
-                 issues.push({
+                issues.push({
                     line: index + 1,
                     type: "Warning",
                     message: "Looping through MAX_PLAYERS inside a fast-executing callback can impact performance. Ensure this is necessary.",
@@ -641,7 +641,7 @@ export class PawnManager {
         return issues;
     }
 
-    async checkMcpUpdate(current: string = "1.0.2"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
+    async checkMcpUpdate(current: string = "1.0.0"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
         try {
             const { stdout } = await execPromise('npm view samp-mcp version');
             const latest = stdout.trim();
