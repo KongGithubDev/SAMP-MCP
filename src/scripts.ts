@@ -542,7 +542,6 @@ export class PawnManager {
     }
 
     async getDashboard(client: any): Promise<any> {
-        if (!this.serverRoot) return { error: "No root set" };
 
         const info = await client.getInfo();
         const players = await client.getPlayers();
@@ -643,7 +642,8 @@ export class PawnManager {
         return issues;
     }
 
-    async checkMcpUpdate(current: string = "1.0.4"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
+    async checkMcpUpdate(current: string = "1.0.5"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
+        const checkVersion = current;
         try {
             const { stdout } = await execPromise('npm view samp-mcp version');
             const latest = stdout.trim();

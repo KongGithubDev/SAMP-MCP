@@ -8,7 +8,7 @@ import { PawnManager } from './scripts.js';
 
 dotenv.config();
 
-const APP_VERSION = "1.0.4";
+const APP_VERSION = "1.0.5";
 
 const server = new McpServer({
   name: "samp-mcp-server",
@@ -25,8 +25,18 @@ async function updateConnection(root: string, hostOverride?: string, portOverrid
     const password = passOverride || detected.password;
     
     client = new SampClient(host, port, password);
-    console.error(`Connected to SAMP server at: ${root} (Port: ${port})`);
+    console.error(`Connected to SAMP server at: ${root} (Host: ${host}, Port: ${port})`);
     return { root, port, password };
+}
+
+async function getTempClient(address?: string): Promise<SampClient> {
+    if (address) {
+        let [host, portStr] = address.split(':');
+        let port = portStr ? parseInt(portStr, 10) : 7777;
+        return new SampClient(host, port);
+    }
+    ensureRoot();
+    return client!;
 }
 
 // Tool: Set Server Root (THE NEW CORE TOOL)
@@ -84,11 +94,11 @@ server.tool(
 server.tool(
   "get_status",
   "Get current server statistics (hostname, players, map, etc.)",
-  {},
-  async () => {
+  { address: z.string().optional().describe("Optional host:port to query instead of the project server") },
+  async ({ address }) => {
     try {
-      ensureRoot();
-      const stats = await client!.getInfo();
+      const targetClient = await getTempClient(address);
+      const stats = await targetClient.getInfo();
       return {
         content: [{ type: "text", text: JSON.stringify(stats, null, 2) }]
       };
@@ -105,11 +115,11 @@ server.tool(
 server.tool(
   "get_players",
   "Get the current list of players (ID, Name, Score, Ping)",
-  {},
-  async () => {
+  { address: z.string().optional().describe("Optional host:port to query instead of the project server") },
+  async ({ address }) => {
     try {
-      ensureRoot();
-      const players = await client!.getPlayers();
+      const targetClient = await getTempClient(address);
+      const players = await targetClient.getPlayers();
       return {
         content: [{ type: "text", text: JSON.stringify(players, null, 2) }]
       };
@@ -126,11 +136,11 @@ server.tool(
 server.tool(
   "get_rules",
   "Get current server rules (gravity, weather, version, etc.)",
-  {},
-  async () => {
+  { address: z.string().optional().describe("Optional host:port to query instead of the project server") },
+  async ({ address }) => {
     try {
-      ensureRoot();
-      const rules = await client!.getRules();
+      const targetClient = await getTempClient(address);
+      const rules = await targetClient.getRules();
       return {
         content: [{ type: "text", text: JSON.stringify(rules, null, 2) }]
       };
@@ -879,11 +889,11 @@ server.tool(
 server.tool(
   "get_dashboard",
   "Get a real-time summary of server health, players, and performance.",
-  {},
-  async () => {
+  { address: z.string().optional().describe("Optional host:port to query instead of the project server") },
+  async ({ address }) => {
     try {
-      ensureRoot();
-      const dash = await pawn.getDashboard(client);
+      const targetClient = await getTempClient(address);
+      const dash = await pawn.getDashboard(targetClient);
       return {
         content: [{ type: "text", text: JSON.stringify(dash, null, 2) }]
       };
