@@ -37,12 +37,12 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "dotenv": "^17.3.1",
     "iconv-lite": "^0.7.2",
-    "zod": "^5.0.0-beta.0"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/iconv-lite": "^0.0.1",
     "@types/node": "^25.5.0",
     "ts-node": "^10.9.2",
-    "typescript": "^6.0.2"
+    "typescript": "^5.4.5"
   }
 }
