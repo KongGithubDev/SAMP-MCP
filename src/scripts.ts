@@ -42,9 +42,9 @@ export class PawnManager {
 
         // Parse server.cfg
         const config = await this.readConfig();
-        const portMatch = config.match(/^port\s+(\d+)/m);
-        const passMatch = config.match(/^rcon_password\s+(.+)/m);
-        const bindMatch = config.match(/^bind\s+(.+)/m);
+        const portMatch = config.match(/\bport\s+(\d+)/i);
+        const passMatch = config.match(/\brcon_password\s+(.+)/i);
+        const bindMatch = config.match(/\b(?:bind|blind)\s+([^\s\r\n]+)/i);
 
         return {
             port: portMatch ? parseInt(portMatch[1], 10) : 7777,
@@ -642,7 +642,7 @@ export class PawnManager {
         return issues;
     }
 
-    async checkMcpUpdate(current: string = "1.0.5"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
+    async checkMcpUpdate(current: string = "1.0.6"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
         const checkVersion = current;
         try {
             const { stdout } = await execPromise('npm view samp-mcp version');
