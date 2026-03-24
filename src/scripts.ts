@@ -720,7 +720,7 @@ export class PawnManager {
         return issues;
     }
 
-    async checkMcpUpdate(current: string = "1.0.6"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
+    async checkMcpUpdate(current: string = "1.0.8"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
         const checkVersion = current;
         try {
             const { stdout } = await execPromise('npm view samp-mcp version');

@@ -18,7 +18,7 @@ console.log = (...args: any[]) => {
 dotenv.config({ quiet: true });
 console.log = originalLog;
 
-const APP_VERSION = "1.0.6";
+const APP_VERSION = "1.0.8";
 
 const server = new McpServer({
   name: "samp-mcp-server",
