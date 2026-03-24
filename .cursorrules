@@ -1,0 +1,15 @@
+# SAMP Project Rules for Cursor
+
+1. **ENCODING (CRITICAL)**:
+   - This project uses **Thai (Windows-874)** for .pwn and .inc.
+   - NEVER use `view_file` or `write_file`.
+   - ALWAYS use `read_pawn_script` and `write_pawn_script`.
+   
+2. **LANGUAGE**:
+   - DO NOT translate Thai strings to English.
+   - New code must follow the existing language (Thai if applicable).
+
+3. **TOOLS**:
+   - Prefer `transform_pawn_script` for cloning systems.
+   - Prefer `generate_boilerplate` for new features.
+   - Use `fix_script_encoding` if you see corrupted text.

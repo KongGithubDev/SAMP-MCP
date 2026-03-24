@@ -46,6 +46,10 @@ Add the following to your MCP client configuration (e.g., `claude_desktop_config
 Once initialized, tell the AI agent:
 *"Connect to my SAMP server at C:\path\to\server"*
 
+### 3. Initialize AI Agent (Ultra-Short Prompt)
+Copy and paste this as your **first prompt** to the AI:
+> "SAMP Project. Read `SAMP_RULES.md` and follow encoding rules. Run `set_server_root` to start."
+
 ---
 
 ## Tool Categories
