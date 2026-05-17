@@ -1336,28 +1336,6 @@ server.tool(
   }
 );
 
-// Tool: Fix Script Encoding
-server.tool(
-  "fix_script_encoding",
-  "Attempt to recover a .pwn/.inc file that was corrupted by an AI using the wrong encoding (e.g., showing 'ยยกต' or garbage).",
-  { 
-    path: z.string().describe("Path to the corrupted file") 
-  },
-  async ({ path }) => {
-    try {
-      const result = await pawn.fixScriptEncoding(path);
-      return {
-        content: [{ type: "text", text: result }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error fixing encoding: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
 // Tool: Setup AI Environment
 server.tool(
   "setup_ai_environment",
