@@ -395,15 +395,17 @@ server.tool(
 // Tool: Read SAMP Source (.pwn, .inc)
 server.tool(
   "read_pawn_script",
-  "MANDATORY: ALWAYS use this for .pwn/.inc files. It is the ONLY safe way to handle encoding and language. Standard tools WILL corrupt files.",
+  "MANDATORY: ALWAYS use this for .pwn/.inc files. It is the ONLY safe way to handle encoding and language. Standard tools WILL corrupt files. Optionally read only a specific line range (1-indexed).",
   { 
     path: z.string().describe("Path to the file"),
-    encoding: z.string().optional().describe("Override encoding (defaults to project's auto-detected encoding)")
+    encoding: z.string().optional().describe("Override encoding (defaults to project's auto-detected encoding)"),
+    startLine: z.number().optional().describe("First line to read (1-indexed). Omit to read from the start."),
+    endLine: z.number().optional().describe("Last line to read (1-indexed). Omit to read to the end.")
   },
-  async ({ path, encoding }) => {
+  async ({ path, encoding, startLine, endLine }) => {
     try {
       ensureRoot();
-      const content = await pawn.readScript(path, encoding);
+      const content = await pawn.readScript(path, encoding, startLine, endLine);
       return {
         content: [{ type: "text", text: content }]
       };
@@ -419,18 +421,171 @@ server.tool(
 // Tool: Write SAMP Source (.pwn, .inc)
 server.tool(
   "write_pawn_script",
-  "MANDATORY: ALWAYS use this for .pwn/.inc files. It is the ONLY safe way to handle encoding and language. Standard tools WILL corrupt files.",
-  { 
+  "MANDATORY: ALWAYS use this for .pwn/.inc files. It is the ONLY safe way to handle encoding and language. Standard tools WILL corrupt files. CRITICAL: When replacing a line range, ALWAYS provide BOTH startLine AND endLine. Providing only startLine replaces only that single line.",
+  {
     path: z.string().describe("Path to the file"),
     content: z.string().describe("Content to write"),
-    encoding: z.string().optional().describe("Override encoding (defaults to project's auto-detected encoding)")
+    encoding: z.string().optional().describe("Override encoding (defaults to project's auto-detected encoding)"),
+    startLine: z.number().optional().describe("First line to replace (1-indexed). Omit to overwrite the entire file."),
+    endLine: z.number().optional().describe("Last line to replace (1-indexed). MUST be >= startLine. Omitting this with startLine set replaces ONLY that single line, NOT to end of file.")
   },
-  async ({ path, content, encoding }) => {
+  async ({ path, content, encoding, startLine, endLine }) => {
     try {
       ensureRoot();
-      await pawn.writeScript(path, content, encoding);
+      const backupResult = await pawn.writeScript(path, content, encoding, startLine, endLine);
+      const scope = startLine !== undefined ? ` (lines ${startLine}-${endLine || startLine})` : '';
       return {
-        content: [{ type: "text", text: `Successfully wrote to ${path}` }]
+        content: [
+          { type: "text", text: `Successfully wrote to ${path}${scope}` },
+          { type: "text", text: `Backup: ${backupResult}` }
+        ]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Search in Pawn Scripts
+server.tool(
+  "search_pawn_script",
+  "Search for text inside .pwn/.inc files across the entire project. Returns file paths, line numbers, and surrounding context. Much more efficient than reading entire files.",
+  {
+    query: z.string().describe("Text to search for (case-insensitive)"),
+    maxResults: z.number().optional().default(10).describe("Max number of matches to return"),
+    contextLines: z.number().optional().default(3).describe("Number of surrounding lines to show per match")
+  },
+  async ({ query, maxResults, contextLines }) => {
+    try {
+      ensureRoot();
+      const results = await pawn.searchScript(query, maxResults, contextLines);
+      return {
+        content: [{ type: "text", text: results }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Fuzzy Find File
+server.tool(
+  "fuzzy_find_file",
+  "Find .pwn/.inc/.cfg files by partial name match. Useful when you can't remember the exact file path.",
+  {
+    name: z.string().describe("Partial filename to search for (e.g. 'main', 'airdrop')"),
+    maxResults: z.number().optional().default(5).describe("Max results to return")
+  },
+  async ({ name, maxResults }) => {
+    try {
+      ensureRoot();
+      const results = await pawn.fuzzyFindFile(name, maxResults);
+      return {
+        content: [{ type: "text", text: results }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Get Function Body
+server.tool(
+  "get_function_body",
+  "Extract the complete body of a function by name from a .pwn/.inc file. Much more efficient than reading the entire file. Returns only the function code with optional doc comments.",
+  {
+    path: z.string().describe("Path to the .pwn/.inc file"),
+    functionName: z.string().describe("Name of the function to extract"),
+    includeDoc: z.boolean().optional().default(false).describe("Include doc comments above the function")
+  },
+  async ({ path, functionName, includeDoc }) => {
+    try {
+      ensureRoot();
+      const results = await pawn.getFunctionBody(path, functionName, includeDoc);
+      return {
+        content: [{ type: "text", text: results }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Restore Pawn Script
+server.tool(
+  "restore_pawn_script",
+  "Restore a .pwn/.inc file from its latest backup (or a specific backup). Use this as 'undo' when a write goes wrong.",
+  {
+    path: z.string().describe("Path to the file to restore"),
+    backupName: z.string().optional().describe("Optional specific backup filename to restore from. If omitted, restores the latest backup.")
+  },
+  async ({ path, backupName }) => {
+    try {
+      ensureRoot();
+      const result = await pawn.restoreScript(path, backupName);
+      return {
+        content: [{ type: "text", text: result }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: List Backups
+server.tool(
+  "list_backups",
+  "List available backups for a specific file or all files in the project.",
+  {
+    path: z.string().optional().describe("Optional file path to filter backups for a specific file")
+  },
+  async ({ path }) => {
+    try {
+      ensureRoot();
+      const backups = await pawn.listBackups(path);
+      if (backups.length === 0) {
+        return {
+          content: [{ type: "text", text: "No backups found." }]
+        };
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify(backups, null, 2) }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Fix Script Encoding
+server.tool(
+  "fix_script_encoding",
+  "Fix encoding corruption in a .pwn/.inc file. If another AI saved Thai text as UTF-8 (causing garbled characters like ยยกต), this tool converts it back to the correct Windows-874 encoding.",
+  { path: z.string().describe("Path to the corrupted file") },
+  async ({ path }) => {
+    try {
+      ensureRoot();
+      const result = await pawn.fixScriptEncoding(path);
+      return {
+        content: [{ type: "text", text: result }]
       };
     } catch (error: any) {
       return {
@@ -602,7 +757,9 @@ server.tool(
       content: [{ type: "text", text: list }]
     };
   }
-);// Tool: Inspect Project
+);
+
+// Tool: Inspect Project
 server.tool(
   "inspect_project",
   "Get a summary of the project size, line counts, and estimated command/dialog counts.",
@@ -672,6 +829,7 @@ server.tool(
     }
   }
 );
+
 // Tool: Generate Docs
 server.tool(
   "generate_docs",
@@ -866,15 +1024,59 @@ server.tool(
 // Tool: Install Plugin
 server.tool(
   "install_plugin",
-  "Download and install a SAMP plugin library (.dll or .so) and update server.cfg.",
+  "Download and install a SAMP plugin (.dll/.so) and update server.cfg. Supports GitHub repos (e.g. 'IS4Code/YSF') or direct download URLs.",
   { 
-    url: z.string().url().describe("The direct URL to the plugin file (e.g. from GitHub releases)"),
-    name: z.string().describe("The plugin name (e.g. 'streamer' or 'mysql')")
+    url: z.string().describe("GitHub repo (e.g. 'IS4Code/YSF') or direct download URL"),
+    name: z.string().describe("The plugin name (e.g. 'streamer', 'YSF')")
   },
   async ({ url, name }) => {
     try {
       ensureRoot();
       const msg = await pawn.installPlugin(url, name);
+      return {
+        content: [{ type: "text", text: msg }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Search Plugin
+server.tool(
+  "search_plugin",
+  "Search for SAMP plugins on GitHub by name. Returns repos and available release binaries.",
+  { name: z.string().describe("Plugin name to search (e.g. 'YSF', 'streamer', 'mysql')") },
+  async ({ name }) => {
+    try {
+      ensureRoot();
+      const msg = await pawn.searchPlugin(name);
+      return {
+        content: [{ type: "text", text: msg }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Web Search
+server.tool(
+  "web_search",
+  "Search the web for general information. Useful for answering questions about SA-MP versions, plugins, game mechanics, etc.",
+  {
+    query: z.string().describe("Search query (e.g. 'SAMP 0.3.7DL review', 'best SAMP plugins 2024')"),
+    domain: z.string().optional().describe("Optional: restrict search to a specific domain (e.g. 'sa-mp.com')")
+  },
+  async ({ query, domain }) => {
+    try {
+      const msg = await pawn.webSearch(query, domain);
       return {
         content: [{ type: "text", text: msg }]
       };
@@ -1030,6 +1232,61 @@ server.tool(
       const msg = await pawn.updateMcpServer();
       return {
         content: [{ type: "text", text: msg }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Design Feature (Planning)
+server.tool(
+  "design_feature",
+  "Before implementing ANY new system, create a structured plan with edge case analysis. The plan is shown to the user inline for review. WAIT for explicit user confirmation before writing code.",
+  {
+    title: z.string().describe("Short feature name (e.g. 'Airdrop System')"),
+    description: z.string().describe("Detailed description of what this feature does"),
+    requirements: z.array(z.string()).optional().describe("List of explicit requirements (optional)")
+  },
+  async ({ title, description, requirements }) => {
+    try {
+      ensureRoot();
+      const planPath = await pawn.designFeature(title, description, requirements);
+      // Read the plan back so the user can review it inline
+      const planContent = await pawn.readScript(planPath, 'utf8');
+      return {
+        content: [
+          { type: "text", text: `Plan created: ${planPath}` },
+          { type: "text", text: "\n========== FEATURE PLAN ==========\n" + planContent },
+          { type: "text", text: "\n========== ACTION REQUIRED ==========\nPlease review the plan above.\n\nReply 'confirm' or 'yes' to proceed with implementation.\nOr tell me what to change/modify before we start coding.\n\nDO NOT write any code until you confirm." }
+        ]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: Review Implementation
+server.tool(
+  "review_implementation",
+  "After implementing a feature, verify that the plan checklist is satisfied and all expected files exist.",
+  {
+    planPath: z.string().describe("Path to the .md plan file created by design_feature"),
+    filesModified: z.array(z.string()).describe("List of files that were created or modified")
+  },
+  async ({ planPath, filesModified }) => {
+    try {
+      ensureRoot();
+      const report = await pawn.reviewImplementation(planPath, filesModified);
+      return {
+        content: [{ type: "text", text: report }]
       };
     } catch (error: any) {
       return {

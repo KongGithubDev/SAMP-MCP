@@ -67,11 +67,30 @@ Copy and paste this as your **first prompt** to the AI:
 
 | Command | Description |
 |---|---|
+| `read_pawn_script` | Read source with encoding detection + line ranges |
+| `write_pawn_script` | Write source with backup + partial line replacement |
+| `search_pawn_script` | Search text across all .pwn/.inc files (efficient) |
+| `fuzzy_find_file` | Find files by partial name when you forgot the path |
+| `get_function_body` | Extract a single function body without reading whole file |
 | `compile_pawn` | Compile .pwn scripts and get structured errors |
-| `read_pawn_script` | Read source with Windows-874 (Thai) support |
-| `write_pawn_script` | Write source maintaining correct encoding |
+| `restore_pawn_script` | Restore a file from its latest backup (undo) |
+| `fix_script_encoding` | Recover corrupted UTF-8 Thai scripts to Windows-874 |
 | `generate_boilerplate` | Generate Commands, Dialogs, or Job templates |
 | `inject_code` | Compile and test snippets without server restart |
+
+### Plugin & Include Management
+
+| Command | Description |
+|---|---|
+| `search_plugin` | Search GitHub repos for SAMP plugins with release info |
+| `install_plugin` | Install .dll/.so plugins — auto-extracts ZIP archives |
+| `install_include` | Download and install .inc libraries from URL |
+
+### Web & Info
+
+| Command | Description |
+|---|---|
+| `web_search` | Search the web via DuckDuckGo for SAMP-related info |
 
 ### Auditing & Diagnostics
 
@@ -87,8 +106,6 @@ Copy and paste this as your **first prompt** to the AI:
 
 | Command | Description |
 |---|---|
-| `install_include` | Download and install .inc libraries from URL |
-| `install_plugin` | Install .dll/.so plugins and update server.cfg |
 | `generate_docs` | Generate markdown documentation for the project |
 | `create_deployment` | Batch copy all necessary server files for distribution |
 
@@ -103,9 +120,12 @@ Copy and paste this as your **first prompt** to the AI:
 
 ## Features
 
-- **Thai Character Support** — Native Windows-874 encoding for scripts
-- **Library Discovery** — Find "Gold Standard" SAMP tools on GitHub
-- **Real-time Monitoring** — Integrated dashboard for server health
+- **Thai Character Support** — Native Windows-874 encoding with UTF-8 corruption recovery
+- **Safe Editing** — Automatic backups + partial line range replacement (no truncation bugs)
+- **Efficient Search** — Search across all scripts, fuzzy file find, extract single functions
+- **Plugin Auto-Install** — GitHub release discovery with ZIP auto-extraction
+- **Web Search** — DuckDuckGo integration for SAMP-related queries
+- **Caching** — Project info cached for 5 minutes to reduce token usage
 - **AI-Powered** — Designed for seamless integration with LLMs
 
 ---
