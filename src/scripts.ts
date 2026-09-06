@@ -1,5 +1,4 @@
 import * as fs from 'fs/promises';
-import { existsSync, readFileSync, statSync as fsSyncStat } from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -69,7 +68,7 @@ export class PawnManager {
         try {
             await fs.access(exePath);
             this.serverExePath = exePath;
-        } catch (e) {
+        } catch {
             // Might be Linux?
             const linuxExe = path.join(this.serverRoot, 'samp03svr');
             try { await fs.access(linuxExe); this.serverExePath = linuxExe; } catch { }
@@ -80,7 +79,7 @@ export class PawnManager {
         try {
             await fs.access(pccPath);
             this.pawnccPath = pccPath;
-        } catch (e) { }
+        } catch { }
 
         // Parse server.cfg
         const config = await this.readConfig();
@@ -93,10 +92,6 @@ export class PawnManager {
             host: bindMatch ? bindMatch[1].trim() : undefined,
             password: passMatch ? passMatch[1].trim() : undefined
         };
-
-        // NUCLEAR OPTION: Automatically setup AI environment rules 
-        // to force the agent to use MCP tools as soon as they connect.
-        try { await this.setupAiEnvironment(); } catch (e) { }
 
         return result;
     }
@@ -132,8 +127,8 @@ export class PawnManager {
                     const utf8Str = buffer.toString('utf8');
                     const isUtf8 = Buffer.from(utf8Str, 'utf8').equals(buffer);
                     if (isUtf8 && /[\u0E00-\u0E7F]/.test(utf8Str)) {
-                        text = `/* [MCP ENCODING WARNING]: This file was corrupted by another AI (saved as UTF-8).
-   Use 'write_pawn_script' to save your changes to fix it permanently. */\n\n${utf8Str}`;
+                        text = `/* [MCP ENCODING NOTE]: This file is valid UTF-8 with Thai text (many editors/plugins expect Windows-874 for this project).
+   Keep it as-is unless the owner asks to convert. */\n\n${utf8Str}`;
                     } else if (isUtf8 && !hasThaiPreferred) {
                         text = utf8Str;
                     } else {
@@ -162,193 +157,6 @@ export class PawnManager {
         }
 
         return text;
-    }
-
-    async searchScript(query: string, maxResults: number = 10, contextLines: number = 3): Promise<string> {
-        if (!this.serverRoot) return "No root set";
-
-        const results: string[] = [];
-        const lowerQuery = query.toLowerCase();
-
-        const walk = async (dir: string, relDir: string = '') => {
-            try {
-                const entries = await fs.readdir(dir, { withFileTypes: true });
-                for (const entry of entries) {
-                    if (results.length >= maxResults) return;
-                    const fullPath = path.join(dir, entry.name);
-                    const relPath = path.join(relDir, entry.name);
-
-                    if (entry.isDirectory() && !['.git', 'node_modules', '.samp-mcp-backups', '.samp-mcp-plans'].includes(entry.name)) {
-                        await walk(fullPath, relPath);
-                    } else if (entry.name.endsWith('.pwn') || entry.name.endsWith('.inc')) {
-                        try {
-                            const content = await this.readScript(fullPath);
-                            const lines = content.split(/\r?\n/);
-                            for (let i = 0; i < lines.length; i++) {
-                                if (lines[i].toLowerCase().includes(lowerQuery)) {
-                                    const start = Math.max(0, i - contextLines);
-                                    const end = Math.min(lines.length, i + contextLines + 1);
-                                    const snippet = lines.slice(start, end).join('\n');
-                                    results.push(`[${relPath}:${i + 1}]\n${snippet}\n---`);
-                                    if (results.length >= maxResults) return;
-                                }
-                            }
-                        } catch { }
-                    }
-                }
-            } catch { }
-        };
-
-        await walk(this.serverRoot);
-
-        return results.length > 0
-            ? `Found ${results.length} match(es) for "${query}":\n\n` + results.join('\n')
-            : `No matches found for "${query}".`;
-    }
-
-    async fuzzyFindFile(nameHint: string, maxResults: number = 5): Promise<string> {
-        if (!this.serverRoot) return "No root set";
-        const lowerHint = nameHint.toLowerCase();
-        const matches: Array<{ relPath: string; score: number }> = [];
-
-        const walk = async (dir: string, relDir: string = '') => {
-            try {
-                const entries = await fs.readdir(dir, { withFileTypes: true });
-                for (const entry of entries) {
-                    const fullPath = path.join(dir, entry.name);
-                    const relPath = path.join(relDir, entry.name);
-
-                    if (entry.isDirectory() && !['.git', 'node_modules', '.samp-mcp-backups', '.samp-mcp-plans'].includes(entry.name)) {
-                        await walk(fullPath, relPath);
-                    } else if (entry.name.endsWith('.pwn') || entry.name.endsWith('.inc') || entry.name.endsWith('.cfg')) {
-                        const lowerName = entry.name.toLowerCase();
-                        if (lowerName.includes(lowerHint)) {
-                            // Score: exact match = 0, starts with = 1, contains = 2
-                            let score = lowerName === lowerHint ? 0 : lowerName.startsWith(lowerHint) ? 1 : 2;
-                            matches.push({ relPath, score });
-                        }
-                    }
-                }
-            } catch { }
-        };
-
-        await walk(this.serverRoot);
-        matches.sort((a, b) => a.score - b.score);
-        const top = matches.slice(0, maxResults);
-
-        return top.length > 0
-            ? `Found ${top.length} file(s) matching "${nameHint}":\n` + top.map(m => `  ${m.relPath}`).join('\n')
-            : `No files found matching "${nameHint}".`;
-    }
-
-    async getFunctionBody(filePath: string, functionName: string, includeDoc: boolean = false): Promise<string> {
-        const fullPath = path.isAbsolute(filePath) ? filePath : path.join(this.serverRoot, filePath);
-        const content = await this.readScript(fullPath);
-        const lines = content.split(/\r?\n/);
-
-        // Match forward declarations and definitions
-        const forwardRegex = new RegExp(`^\\s*(forward|stock|public)?\\s*${functionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\(`);
-        const funcRegex = new RegExp(`^\\s*(${functionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})\\s*\\(`);
-
-        let startLine = -1;
-        let isForward = false;
-
-        for (let i = 0; i < lines.length; i++) {
-            if (forwardRegex.test(lines[i])) {
-                startLine = i;
-                isForward = true;
-                break;
-            } else if (funcRegex.test(lines[i])) {
-                startLine = i;
-                isForward = false;
-                break;
-            }
-        }
-
-        if (startLine === -1) {
-            return `Function "${functionName}" not found in ${filePath}.`;
-        }
-
-        // If forward declaration only, return that single line
-        if (isForward && !lines[startLine].includes('{')) {
-            return `/* [Forward declaration] ${filePath}:${startLine + 1} */\n${lines[startLine]}`;
-        }
-
-        // Find opening brace position
-        let braceLine = startLine;
-        while (braceLine < lines.length && !lines[braceLine].includes('{')) {
-            braceLine++;
-        }
-        if (braceLine >= lines.length) {
-            return `/* [${filePath}:${startLine + 1}] */\n${lines[startLine]}`;
-        }
-
-        // Count braces to find end of function body
-        let braceCount = 0;
-        let endLine = braceLine;
-        for (let i = braceLine; i < lines.length; i++) {
-            for (const char of lines[i]) {
-                if (char === '{') braceCount++;
-                else if (char === '}') braceCount--;
-            }
-            if (braceCount === 0) {
-                endLine = i;
-                break;
-            }
-        }
-
-        // Optional: include doc comment above
-        let docStart = startLine;
-        if (includeDoc) {
-            for (let i = startLine - 1; i >= 0; i--) {
-                const trimmed = lines[i].trim();
-                if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed === '') {
-                    docStart = i;
-                    if (trimmed.startsWith('/*') && !trimmed.endsWith('*/')) break;
-                } else {
-                    break;
-                }
-            }
-        }
-
-        const bodyLines = lines.slice(docStart, endLine + 1);
-        return `/* [${filePath}:${docStart + 1}-${endLine + 1}] Function: ${functionName} */\n${bodyLines.join('\n')}`;
-    }
-
-    async fixScriptEncoding(filePath: string): Promise<string> {
-        const fullPath = path.isAbsolute(filePath) ? filePath : path.join(this.serverRoot, filePath);
-
-        // Check file exists
-        try {
-            await fs.access(fullPath);
-        } catch {
-            throw new Error(`File not found: ${filePath}`);
-        }
-
-        const buffer = await fs.readFile(fullPath);
-
-        // Detect if file is valid UTF-8
-        const utf8Str = buffer.toString('utf8');
-        const isUtf8 = Buffer.from(utf8Str, 'utf8').equals(buffer);
-
-        if (!isUtf8) {
-            return `[INFO] File "${filePath}" is not UTF-8. No conversion needed. Current encoding appears correct.`;
-        }
-
-        const hasThai = /[\u0E00-\u0E7F]/.test(utf8Str);
-        if (!hasThai) {
-            return `[INFO] File "${filePath}" is UTF-8 but contains no Thai characters. No conversion needed.`;
-        }
-
-        // File is UTF-8 with Thai → convert to windows-874
-        try {
-            const backupPath = await this.backupFile(fullPath);
-            const windows874Buffer = iconv.encode(utf8Str, 'windows-874');
-            await fs.writeFile(fullPath, windows874Buffer);
-            return `Successfully fixed encoding for "${filePath}".\nConverted from UTF-8 → windows-874 (Thai).\nBackup: ${backupPath || 'N/A'}`;
-        } catch (err: any) {
-            throw new Error(`Failed to convert encoding: ${err.message}`);
-        }
     }
 
     private async backupFile(fullPath: string): Promise<string | null> {
@@ -417,73 +225,14 @@ export class PawnManager {
         return backupPath || 'No backup needed (new file)';
     }
 
-    async restoreScript(filePath: string, backupPath?: string): Promise<string> {
-        const fullPath = path.isAbsolute(filePath) ? filePath : path.join(this.serverRoot, filePath);
-        const backupDir = path.join(this.serverRoot, '.samp-mcp-backups');
-
-        if (backupPath) {
-            const target = path.isAbsolute(backupPath) ? backupPath : path.join(backupDir, backupPath);
-            await fs.copyFile(target, fullPath);
-            return `Restored ${filePath} from ${backupPath}`;
-        }
-
-        // Find the latest backup for this file
-        const relativePath = path.relative(this.serverRoot, fullPath);
-        const safeName = relativePath.replace(/[\\/]/g, '_');
-
-        try {
-            const files = await fs.readdir(backupDir);
-            const matching = files
-                .filter(f => f.startsWith(safeName + '.') && f.endsWith('.bak'))
-                .sort((a, b) => b.localeCompare(a)); // Newest first
-
-            if (matching.length === 0) {
-                throw new Error('No backups found for this file.');
-            }
-
-            const latest = path.join(backupDir, matching[0]);
-            await fs.copyFile(latest, fullPath);
-            return `Restored ${filePath} from latest backup: ${matching[0]}`;
-        } catch (e: any) {
-            throw new Error(`Restore failed: ${e.message}`);
-        }
-    }
-
-    async listBackups(filePath?: string): Promise<any[]> {
-        const backupDir = path.join(this.serverRoot, '.samp-mcp-backups');
-        try {
-            const files = await fs.readdir(backupDir);
-            let backups = files
-                .filter(f => f.endsWith('.bak'))
-                .map(f => {
-                    const stat = fsSyncStat(path.join(backupDir, f));
-                    return {
-                        name: f,
-                        size: stat.size,
-                        created: stat.mtime.toISOString()
-                    };
-                })
-                .sort((a, b) => b.created.localeCompare(a.created));
-
-            if (filePath) {
-                const fullPath = path.isAbsolute(filePath) ? filePath : path.join(this.serverRoot, filePath);
-                const relativePath = path.relative(this.serverRoot, fullPath);
-                const safeName = relativePath.replace(/[\\/]/g, '_');
-                backups = backups.filter(b => b.name.startsWith(safeName + '.'));
-            }
-
-            return backups;
-        } catch {
-            return [];
-        }
-    }
-
-
     async compilePawn(filePath: string): Promise<{ success: boolean; output: string; errors: any[] }> {
         try {
             const fullPath = path.isAbsolute(filePath) ? filePath : path.join(this.serverRoot, filePath);
+            // pawncc writes the .amx into its current working directory, so run it
+            // from the script's folder to keep output next to the source file.
+            const sourceDir = path.dirname(fullPath);
             // -;+ means partial semicolon, -(+ means more verbose
-            const { stdout, stderr } = await execPromise(`"${this.pawnccPath}" "${fullPath}" -;+ -(+`);
+            const { stdout, stderr } = await execPromise(`"${this.pawnccPath}" "${fullPath}" -;+ -(+`, { cwd: sourceDir });
             const output = (stdout || '') + (stderr || '');
             return { success: true, output, errors: this.parsePawnErrors(output) };
         } catch (error: any) {
@@ -494,17 +243,21 @@ export class PawnManager {
 
     private parsePawnErrors(output: string): any[] {
         const errors: any[] = [];
-        // Pattern: file(line) : type id: message
-        const regex = /^(.*)\((\d+)\)\s+:\s+(error|warning)\s+(\d+)\s+:\s+(.*)$/gm;
-        let match;
-        while ((match = regex.exec(output)) !== null) {
-            errors.push({
-                file: match[1].trim(),
-                line: parseInt(match[2], 10),
-                type: match[3],
-                id: match[4],
-                message: match[5].trim()
-            });
+        // Pattern per line: file(line) : error/warning id: message
+        // pawncc on Windows emits CRCRLF; strip trailing CRs and match line by line.
+        const regex = /^(.*)\((\d+)\)\s*:\s*(error|warning)\s+(\d+)\s*:\s*(.*)$/;
+        for (const rawLine of output.split(/\r?\n/)) {
+            const line = rawLine.replace(/\r+$/, '');
+            const match = regex.exec(line);
+            if (match) {
+                errors.push({
+                    file: match[1].trim(),
+                    line: parseInt(match[2], 10),
+                    type: match[3],
+                    id: match[4],
+                    message: match[5].trim()
+                });
+            }
         }
         return errors;
     }
@@ -522,7 +275,7 @@ export class PawnManager {
                 // Kill process on Windows
                 await execPromise('taskkill /f /im samp-server.exe');
                 if (action === 'stop') return 'Server stopped';
-            } catch (e) {
+            } catch {
                 if (action === 'stop') return 'Server was not running';
             }
         }
@@ -548,19 +301,6 @@ export class PawnManager {
         await fs.writeFile(configPath, buffer);
     }
 
-    async updateConfig(key: string, value: string): Promise<void> {
-        let content = await this.readConfig();
-        const regex = new RegExp(`^${key}\\s+.+`, 'm');
-
-        if (regex.test(content)) {
-            content = content.replace(regex, `${key} ${value}`);
-        } else {
-            content += `\n${key} ${value}`;
-        }
-
-        await this.writeConfig(content);
-    }
-
     async readServerLog(limit: number = 50): Promise<string> {
         const logPath = path.join(this.serverRoot || path.dirname(this.serverExePath), 'server_log.txt');
         try {
@@ -578,7 +318,7 @@ export class PawnManager {
         try {
             const files = await fs.readdir(dirPath);
             return files;
-        } catch (e) {
+        } catch {
             throw new Error(`Directory ${subdir} not found or inaccessible`);
         }
     }
@@ -605,36 +345,6 @@ export class PawnManager {
         return result;
     }
 
-    async readInclude(name: string): Promise<string> {
-        const fileName = name.endsWith('.inc') ? name : `${name}.inc`;
-        const searchPaths = [
-            path.join(this.serverRoot, 'pawno', 'include'),
-            path.join(this.serverRoot, 'include'),
-            path.join(this.serverRoot, 'gamemodes', 'include')
-        ];
-
-        for (const basePath of searchPaths) {
-            try {
-                // Try direct path first
-                const directPath = path.join(basePath, fileName);
-                const buffer = await fs.readFile(directPath);
-                return iconv.decode(buffer, 'windows-874');
-            } catch { }
-
-            // Fallback: search recursively in subdirectories
-            try {
-                const files = await this.readdirRecursive(basePath);
-                const match = files.find(f => f.toLowerCase() === fileName.toLowerCase() ||
-                    f.toLowerCase().replace(/\\/g, '/').endsWith(fileName.toLowerCase()));
-                if (match) {
-                    const buffer = await fs.readFile(path.join(basePath, match));
-                    return iconv.decode(buffer, 'windows-874');
-                }
-            } catch { }
-        }
-        throw new Error(`Include file ${name} not found in common paths.`);
-    }
-
     async detectPatterns(): Promise<any> {
         if (!this.serverRoot) return { error: "No root set" };
 
@@ -649,7 +359,15 @@ export class PawnManager {
             hasMySQL: false,
             hasStreamer: false,
             version: "0.3.7",
-            thaiSupport: false
+            thaiSupport: false,
+            architecture: 'monolithic',
+            hasSystemModules: false,
+            systemModuleCount: 0,
+            systemCategories: [],
+            hasStartProgress: false,
+            hasCommandFlags: false,
+            hasDialogConvention: false,
+            messageHelpers: []
         };
 
         // Check for sampctl
@@ -678,6 +396,66 @@ export class PawnManager {
             if (/[\u0E00-\u0E7F]/.test(config)) {
                 patterns.thaiSupport = true;
             }
+        } catch { }
+
+        // Detect module-based architecture (CareerCity-style gamemodes/includes/system/*.inc)
+        patterns.hasSystemModules = false;
+        patterns.systemModuleCount = 0;
+        patterns.systemCategories = [];
+        patterns.hasStartProgress = false;
+        patterns.hasCommandFlags = false;
+        patterns.hasDialogConvention = false;
+        patterns.messageHelpers = [];
+
+        const gmIncDir = path.join(this.serverRoot, 'gamemodes', 'includes');
+        try {
+            const gmTop = await fs.readdir(gmIncDir);
+            if (gmTop.includes('system')) {
+                patterns.hasSystemModules = true;
+                patterns.architecture = 'system-modules';
+                const sysRoot = path.join(gmIncDir, 'system');
+                const countModules = async (dir: string, rel: string) => {
+                    const entries = await fs.readdir(dir);
+                    for (const entry of entries) {
+                        const full = path.join(dir, entry);
+                        const st = await fs.stat(full);
+                        if (st.isDirectory()) {
+                            await countModules(full, rel === '' ? entry : rel + '/' + entry);
+                        } else if (entry.toLowerCase().endsWith('.inc')) {
+                            patterns.systemModuleCount++;
+                        }
+                    }
+                    if (rel !== '' && !patterns.systemCategories.includes(rel)) patterns.systemCategories.push(rel);
+                };
+                await countModules(sysRoot, '');
+
+                // Sample a handful of modules for the runtime conventions in use
+                let sampled = 0;
+                const sampleDir = async (dir: string) => {
+                    const entries = await fs.readdir(dir);
+                    for (const entry of entries) {
+                        if (sampled >= 12) return;
+                        const full = path.join(dir, entry);
+                        const st = await fs.stat(full);
+                        if (st.isDirectory()) {
+                            await sampleDir(full);
+                        } else if (entry.toLowerCase().endsWith('.inc')) {
+                            sampled++;
+                            const text = await this.readScript(full).catch(() => '');
+                            if (/StartProgress\s*\(/.test(text)) patterns.hasStartProgress = true;
+                            if (/^\s*flags\s*:\s*\w+/m.test(text)) patterns.hasCommandFlags = true;
+                            if (/Dialog\s*:\s*\w+/.test(text)) patterns.hasDialogConvention = true;
+                        }
+                    }
+                };
+                await sampleDir(sysRoot);
+            }
+        } catch { }
+
+        // Shared message macros (gamemodes/includes/defines.inc)
+        try {
+            const definesText = await this.readScript(path.join('gamemodes', 'includes', 'defines.inc')).catch(() => '');
+            patterns.messageHelpers = ['SyntaxMsg', 'ServerMsg', 'ErrorMsg'].filter(m => definesText.includes(m));
         } catch { }
 
         // Final check: scan main.pwn or some files for Thai
@@ -831,6 +609,223 @@ export class PawnManager {
         return docs;
     }
 
+    async studyProject(): Promise<string> {
+        if (!this.serverRoot) throw new Error("No root set. Run set_server_root first.");
+
+        const gmDir = path.join(this.serverRoot, 'gamemodes');
+        const outPath = path.join(this.serverRoot, 'SAMP_STUDY.md');
+
+        // 1) locate the gamemode main script and parse its include graph
+        let mainRel = 'gamemodes/main.pwn';
+        try { await fs.access(path.join(this.serverRoot, mainRel)); }
+        catch {
+            let found = '';
+            try {
+                const list = await fs.readdir(gmDir);
+                found = list.find(f => f.toLowerCase().endsWith('.pwn')) || '';
+            } catch { }
+            if (!found) throw new Error('No gamemode .pwn found under gamemodes/.');
+            mainRel = 'gamemodes/' + found;
+        }
+
+        const mainText = await this.readScript(mainRel).catch(() => '');
+        const libs: string[] = [];          // <angle> includes (libraries)
+        const wired: string[] = [];         // active "local" includes, relative to gamemodes/
+        for (const ln of mainText.split(/\r?\n/)) {
+            const s = ln.trim();
+            if (!s || s.startsWith('//') || s.startsWith('/*') || s.startsWith('*')) continue;
+            const ang = s.match(/^#include\s+<([^>]+)>/);
+            if (ang) { libs.push(ang[1].trim()); continue; }
+            const quo = s.match(/^#include\s+"([^"]+)"/);
+            if (quo) wired.push(quo[1].trim());
+        }
+
+        // 2) scan the wired files + core headers for conventions & performance stats
+        const dirCount: Record<string, number> = {};
+        let totalLines = 0, cmdDefs = 0, pcmdDefs = 0, ycmdDefs = 0, flagsDefs = 0;
+        let dialogDefs = 0, dialogShow = 0, nativeDialog = 0, hookCount = 0;
+        let tquery = 0, mysqlFormat = 0, cacheGet = 0, setTimer = 0, yTimerDefs = 0, repeatUse = 0;
+        let foreachPlayer = 0, forMaxPlayers = 0, startProgress = 0, progressFinish = 0;
+        let hasCmdReceived = false;
+        const msgUse: Record<string, number> = {};
+        const msgCands = ['ErrorMsg', 'ServerMsg', 'SyntaxMsg', 'UsageMsg', 'SuccessMsg', 'InfoMsg'];
+        let stateArray = '', stateEnumName = '', stateFields: string[] = [];
+        const ex: any = { cmd: '', flags: '', dialogShow: '', dialogDef: '', progressCall: '', finishHook: '', tquery: '', keyHook: '', msg: '' };
+        const trunc = (x: string, n: number) => x.length > n ? x.substring(0, n) + '...' : x;
+
+        const scanFiles: string[] = [mainRel];
+        for (const rel of wired) scanFiles.push(path.join('gamemodes', rel));
+
+        const scanFile = async (relKey: string, fullPath: string) => {
+            let text: string;
+            try { text = await this.readScript(fullPath); } catch { return; }
+            totalLines += text.split(/\r?\n/).length;
+            const d = path.dirname(relKey).replace(/^gamemodes[/\\]/, '').replace(/\\/g, '/');
+            dirCount[d] = (dirCount[d] || 0) + 1;
+
+            // per-player state array declaration (e.g. new PlayerInfo[MAX_PLAYERS][E_PLAYERS])
+            if (!stateEnumName) {
+                const arr = text.match(/new\s+([A-Za-z_]\w*)\[MAX_PLAYERS\]\[([A-Za-z_]\w*)\]/);
+                if (arr) { stateArray = arr[1]; stateEnumName = arr[2]; }
+            }
+
+            let inBlock = false;
+            for (const raw of text.split(/\r?\n/)) {
+                const s = raw.trim();
+                if (s.startsWith('/*')) inBlock = true;
+                if (inBlock) { if (s.includes('*/')) inBlock = false; continue; }
+                if (!s || s.startsWith('//') || s.startsWith('#')) continue;
+
+                if (/^CMD:[A-Za-z_]/.test(s)) cmdDefs++;
+                else if (/^PCMD:[A-Za-z_]/.test(s)) pcmdDefs++;
+                else if (/^(YCMD|Y_COMMAND):[A-Za-z_]/.test(s)) ycmdDefs++;
+                if (/^flags\s*:\s*\w+/.test(s)) flagsDefs++;
+                if (/^Dialog\s*:\s*\w+/.test(s)) dialogDefs++;
+                if (/^hook\s+\w+/.test(s)) hookCount++;
+                if (/^timer\s+\w+\s*\[\s*\d+\s*\]/.test(s)) yTimerDefs++;
+                if (/for\s*\(\s*new\s+i\s*=\s*0\s*;\s*i\s*<\s*MAX_PLAYERS/.test(s)) forMaxPlayers++;
+                foreachPlayer += (s.match(/foreach\(new i : Player\)/g) || []).length;
+                dialogShow += (s.match(/Dialog_Show\(/g) || []).length;
+                nativeDialog += (s.match(/ShowPlayerDialog\(/g) || []).length;
+                tquery += (s.match(/mysql_tquery\(/g) || []).length;
+                mysqlFormat += (s.match(/mysql_format\(/g) || []).length;
+                cacheGet += (s.match(/cache_get_value_name(?:_int|_float)?\(/g) || []).length;
+                setTimer += (s.match(/SetTimer(Ex)?\(/g) || []).length;
+                repeatUse += (s.match(/\brepeat\s+\w+/g) || []).length;
+                startProgress += (s.match(/StartProgress\(/g) || []).length;
+                if (/^hook\s+OnProgressFinish\s*\(/.test(s)) progressFinish++;
+                if (/OnPlayerCommandReceived\(/.test(s)) hasCmdReceived = true;
+                for (const c of msgCands) if (s.includes(c + '(')) msgUse[c] = (msgUse[c] || 0) + 1;
+
+                if (!ex.flags && /^flags\s*:\s*\w+/.test(s)) ex.flags = trunc(raw, 140);
+                if (!ex.cmd && /^CMD:[A-Za-z_]/.test(s)) ex.cmd = trunc(raw, 140);
+                if (!ex.dialogShow && /Dialog_Show\(/.test(s)) ex.dialogShow = trunc(raw, 160);
+                if (!ex.dialogDef && /^Dialog\s*:\s*\w+/.test(s)) ex.dialogDef = trunc(raw, 140);
+                if (!ex.progressCall && /StartProgress\(/.test(s)) ex.progressCall = trunc(raw, 150);
+                if (!ex.tquery && /mysql_tquery\(/.test(s) && !s.includes('%')) ex.tquery = trunc(raw, 150);
+                if (!ex.msg && msgCands.some(c => s.includes(c + '('))) {
+                    ex.msg = trunc(raw, 140);
+                }
+                if (!ex.finishHook && /^hook\s+OnProgressFinish\s*\(/.test(s)) {
+                    ex.finishHook = trunc(raw, 140);
+                }
+                if (!ex.keyHook && /^hook\s+OnPlayerKeyStateChange\s*\(/.test(s)) {
+                    ex.keyHook = trunc(raw, 140);
+                }
+            }
+        };
+
+        for (const rel of scanFiles) {
+            const full = path.isAbsolute(rel) ? rel : path.join(this.serverRoot, rel);
+            await scanFile(rel, full);
+        }
+
+        // sample fields of the per-player enum (may live in a different file than the array)
+        if (stateEnumName && stateFields.length === 0) {
+            for (const rel of scanFiles) {
+                const full = path.isAbsolute(rel) ? rel : path.join(this.serverRoot, rel);
+                let t2: string;
+                try { t2 = await this.readScript(full); } catch { continue; }
+                const re = new RegExp('enum\\s+' + stateEnumName + '\\s*\\{([\\s\\S]{0,6000})');
+                const m = t2.match(re);
+                if (m) {
+                    const seen = new Set<string>();
+                    const found: string[] = [];
+                    for (const f of m[1].match(/[A-Za-z_]\w*(?=\s*(?:,|:))/g) || []) {
+                        const base = (f.split(':').pop() || f).trim();
+                        if (!seen.has(base)) { seen.add(base); found.push(base); }
+                    }
+                    const pFields = found.filter(x => /^p[A-Z]/.test(x));
+                    const filtered = pFields.length > 0
+                        ? pFields
+                        : found.filter(x => !/^(Float|bool|Timer|Text3D|PlayerText3D|Iterator|bool:|Float:)$/.test(x));
+                    stateFields = filtered.slice(0, 16);
+                    break;
+                }
+            }
+        }
+
+        // 3) infer conventions
+        const libText = libs.map(l => l.toLowerCase()).join(' ');
+        const cmdSystem = /pawn.?cmd/.test(libText) ? 'Pawn.CMD (CMD:name / PCMD:name)'
+            : /zcmd/.test(libText) ? 'ZCMD (CMD:name)'
+            : /y_commands/.test(libText) ? 'YSI y_commands (CMD: / YCMD:)'
+            : 'undetected (check main includes)';
+        const dlgSystem = dialogShow > 0 && /easydialog/.test(libText) ? 'easyDialog (Dialog_Show + Dialog:NAME handlers)'
+            : dialogDefs > 0 ? 'Dialog:-style definitions (y_dialogs-like / easyDialog)'
+            : nativeDialog > 0 ? 'native ShowPlayerDialog + OnDialogResponse'
+            : 'undetected';
+        const modulePattern = dirCount['includes/system'] > 0 || dirCount['includes/system/job'] > 0;
+        const msgs = msgCands.filter(c => (msgUse[c] || 0) > 0);
+
+        // 4) build the markdown study
+        const L: string[] = [];
+        const P = (x: string) => L.push(x);
+        P('# SAMP Gamemode Study');
+        P('');
+        P('Auto-generated by samp-mcp `study_project` against the connected server root. It reflects what this script actually uses — edit code only with encoding-aware file tools so Thai (Windows-874) and CRLF stay intact.');
+        P('');
+        P('## 1. Overview');
+        P(`- Main script: \`${mainRel}\``);
+        P(`- Wired local includes: ${wired.length} | Files scanned: ${scanFiles.length} | Lines scanned: ${totalLines.toLocaleString()}`);
+        P(`- Commands defined: ${cmdDefs} CMD:${pcmdDefs > 0 ? `, ${pcmdDefs} PCMD:` : ''}${ycmdDefs > 0 ? `, ${ycmdDefs} YCMD:` : ''}${flagsDefs > 0 ? ` | ${flagsDefs} flags: permission gates` : ''}`);
+        P(`- Dialogs: ${dialogDefs} Dialog: defs, ${dialogShow} Dialog_Show calls${nativeDialog > 0 ? `, ${nativeDialog} native ShowPlayerDialog` : ''}`);
+        P(`- System modules pattern: ${modulePattern ? 'YES (modules under includes/system)' : 'no / undetected'}`);
+        P('');
+        P('## 2. Libraries (angle includes in the gamemode)');
+        if (libs.length) { for (const l of libs) P(`- \`${l}\``); } else P('- (none found)');
+        P('');
+        P('## 3. Include layout (wired files by folder)');
+        const cats = Object.keys(dirCount).sort();
+        for (const c of cats) P(`- ${c || '.'}: ${dirCount[c]}`);
+        P('');
+        P('## 4. Command system');
+        P(`- Inferred: **${cmdSystem}**`);
+        P(`- Evidence: ${cmdDefs} CMD: definitions${pcmdDefs > 0 ? `, ${pcmdDefs} PCMD:` : ''}${flagsDefs > 0 ? `, ${flagsDefs} flags: declarations` : ''}${hasCmdReceived ? '; permission auto-check present (OnPlayerCommandReceived)' : ''}`);
+        P(`- Convention: define \`CMD:name(playerid, params[])\` inside the owning module/file; ${flagsDefs > 0 ? 'gate admin commands with \`flags:name(CMD_xxx)\` (bits verified against the player permission bitmask)' : 'no flag-gated commands observed'}.`);
+        if (ex.flags || ex.cmd) { P(''); P('```pawn'); if (ex.flags) P(ex.flags); if (ex.cmd) P(ex.cmd); P('```'); }
+        P('');
+        P('## 5. Dialogs');
+        P(`- Inferred: **${dlgSystem}**`);
+        P(`- Evidence: ${dialogDefs} \`Dialog:NAME(playerid, response, listitem, inputtext[])\` handlers, ${dialogShow} \`Dialog_Show(...)\` calls${nativeDialog > 0 ? `, ${nativeDialog} native ShowPlayerDialog calls` : ''}.`);
+        if (ex.dialogShow || ex.dialogDef) { P(''); P('```pawn'); if (ex.dialogShow) P(ex.dialogShow); if (ex.dialogDef) P(ex.dialogDef); P('```'); }
+        P('');
+        P('## 6. Player messages & state');
+        const msgList = msgs.map(m => `${m}(${(msgUse as any)[m]})`).join(', ');
+        P(`- Message macros in use: ${msgList || '(none matched standard list)'}`);
+        if (stateEnumName) P(`- Per-player state: \`new ${stateArray}[MAX_PLAYERS][${stateEnumName}]\` (enum ${stateEnumName}; sample fields: ${stateFields.join(', ')}). Access it as \`${stateArray}[playerid][pX]\` like the rest of the script.`);
+        else P('- No per-player enum array detected — state likely lives in per-module static arrays / PVars.');
+        P('');
+        P('## 7. Timers, progress & async work');
+        P(`- YSI timers (\`timer X[interval]\`): ${yTimerDefs} definitions | \`repeat\` usages: ${repeatUse} | legacy \`SetTimer\`: ${setTimer}`);
+        P(`- Timed player actions: StartProgress calls ${startProgress}${progressFinish > 0 ? ` with ${progressFinish} \`hook OnProgressFinish\` handlers (guard by module state flag)` : ''}`);
+        P(`- MySQL: \`mysql_tquery\` ${tquery} | \`mysql_format\` ${mysqlFormat} | cache reads ${cacheGet}${tquery > 0 ? ' → all DB work is threaded callbacks (cache_* inside), never blocking queries' : ''}`);
+        if (ex.progressCall || ex.finishHook || ex.tquery) { P(''); P('```pawn'); if (ex.progressCall) P(ex.progressCall); if (ex.finishHook) P(ex.finishHook); if (ex.tquery) P(ex.tquery); P('```'); }
+        P('');
+        P('## 8. Iteration & hot paths (performance)');
+        P(`- \`foreach(new i : Player)\`: ${foreachPlayer} | \`for (new i = 0; i < MAX_PLAYERS...)\`: ${forMaxPlayers} | top-level \`hook\` handlers: ${hookCount}`);
+        P(`- Derived rules: ${forMaxPlayers > 0 ? 'prefer converting for(MAX_PLAYERS) loops to foreach(Player); ' : ''}use YSI timers (already ${yTimerDefs} here) and stop them on disconnect; keep OnPlayerUpdate and fast per-player callbacks light; ${tquery > 0 ? 'keep MySQL threaded (mysql_format + mysql_tquery + cache_* in callback); ' : ''}world objects/3D labels via Streamer dynamic calls; reset per-player state in OnPlayerConnect and clean up in OnPlayerDisconnect.`);
+        if (ex.keyHook) { P(''); P('```pawn'); P(ex.keyHook); P('```'); }
+        P('');
+        P('## 9. How to add a feature here');
+        if (modulePattern) {
+            P(`- Create ONE self-contained module under \`gamemodes/includes/system/<name>.inc\` (or \`system/job/\` for job modules) owning its state, hooks, commands and dialogs.`);
+            P('- Wire it in the gamemode main script with a quoted include in the same style as neighbours (keep dependency order).');
+            P('- Follow sections 4-8: same command/dialog/message/timer/DB style as the snippets above.');
+        } else {
+            P('- No module layout detected: mirror the include ordering and conventions above, or let design_feature propose a structure.');
+        }
+        P('- All reads/writes/edits of .pwn/.inc go through encoding-aware file tools; never re-save with plain editors.');
+        P('- Verify with compile_pawn before finishing.');
+        P('');
+        P('---');
+        P('Regenerate anytime with the study_project tool (it re-scans the script).');
+
+        const md = L.join('\n');
+        await fs.writeFile(outPath, '\uFEFF' + md, 'utf8');
+        return outPath;
+    }
+
     async checkIncludes(): Promise<any[]> {
         if (!this.serverRoot) return [];
 
@@ -904,9 +899,6 @@ export class PawnManager {
         const result = await this.compilePawn(scriptPath);
         if (!result.success) throw new Error(`Compilation failed:\n${JSON.stringify(result.errors)}`);
 
-        // Load via RCON
-        await this.manageServer('restart'); // Just to be sure, or we can loadfs
-        // Actually best is loadfs
         return "Code injected and compiled. Use RCON 'loadfs mcp_test' to activate.";
     }
 
@@ -945,7 +937,7 @@ export class PawnManager {
         }
 
         // Copy all .amx from gamemodes and filterscripts
-        const copyAmx = async (dir: string, sub: string) => {
+        const copyAmx = async (dir: string, _sub: string) => {
             const srcDir = path.join(this.serverRoot, dir);
             const destDir = path.join(absOutputDir, dir);
             await fs.mkdir(destDir, { recursive: true });
@@ -989,29 +981,6 @@ export class PawnManager {
         return `Successfully installed ${name} to ${dest}`;
     }
 
-    async extractStrings(scriptPath: string): Promise<any[]> {
-        const content = await this.readScript(scriptPath);
-        const lines = content.split('\n');
-        const strings: any[] = [];
-
-        // Match string literals
-        const regex = /"(.*?)"/g;
-
-        lines.forEach((line, index) => {
-            let match;
-            while ((match = regex.exec(line)) !== null) {
-                if (match[1].length > 3) { // Ignore very short strings
-                    strings.push({
-                        line: index + 1,
-                        text: match[1]
-                    });
-                }
-            }
-        });
-
-        return strings;
-    }
-
     async getDashboard(client: any): Promise<any> {
 
         const info = await client.getInfo();
@@ -1026,7 +995,7 @@ export class PawnManager {
         return {
             serverName: info.hostname,
             status: "Online",
-            players: `${players.length} / ${info.maxplayers}`,
+            players: `${players.length} / ${info.maxPlayers}`,
             map: info.mapname,
             averagePing: Math.round(avgPing),
             version: rules.version,
@@ -1170,7 +1139,7 @@ export class PawnManager {
             'nativechecker': 'Zeex/samp-plugin-nativechecker'
         };
 
-        let reposToCheck: Array<{ full_name: string; html_url: string; description?: string }> = [];
+        const reposToCheck: Array<{ full_name: string; html_url: string; description?: string }> = [];
 
         // 1. Check known plugins first
         if (knownPlugins[lowerName]) {
@@ -1440,7 +1409,6 @@ export class PawnManager {
     }
 
     async checkMcpUpdate(current: string = "1.0.8"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
-        const checkVersion = current;
         try {
             const { stdout } = await execPromise('npm view samp-mcp version');
             const latest = stdout.trim();
@@ -1449,7 +1417,7 @@ export class PawnManager {
                 latest,
                 needsUpdate: latest !== current
             };
-        } catch (e) {
+        } catch {
             return { current, latest: current, needsUpdate: false };
         }
     }
@@ -1461,43 +1429,6 @@ export class PawnManager {
         } catch (error: any) {
             throw new Error(`Update failed: ${error.message}`);
         }
-    }
-
-    async transformScript(sourcePath: string, targetName: string, oldTheme: string, newTheme: string): Promise<string> {
-        const content = await this.readScript(sourcePath);
-        
-        // Character substitution with case awareness
-        const replaceTheme = (text: string, oldT: string, newT: string) => {
-            let result = text;
-            
-            // 1. UPPER_CASE (e.g. JUICE -> WATERMELON)
-            result = result.split(oldT.toUpperCase()).join(newT.toUpperCase());
-            
-            // 2. lowercase (e.g. juice -> watermelon)
-            result = result.split(oldT.toLowerCase()).join(newT.toLowerCase());
-            
-            // 3. TitleCase / CamelCase (e.g. Juice -> Watermelon)
-            const oldTitle = oldT.charAt(0).toUpperCase() + oldT.slice(1).toLowerCase();
-            const newTitle = newT.charAt(0).toUpperCase() + newT.slice(1).toLowerCase();
-            result = result.split(oldTitle).join(newTitle);
-            
-            // 4. Exact match as fallback
-            result = result.split(oldT).join(newT);
-            
-            return result;
-        };
-
-        const transformed = replaceTheme(content, oldTheme, newTheme);
-        
-        const sourceExt = path.extname(sourcePath) || '.pwn';
-        const targetFileName = targetName.endsWith(sourceExt) ? targetName : targetName + sourceExt;
-        
-        const sourceFullPath = path.isAbsolute(sourcePath) ? sourcePath : path.join(this.serverRoot, sourcePath);
-        const sourceDir = path.dirname(sourceFullPath);
-        const targetFullPath = path.join(sourceDir, targetFileName);
-        
-        await this.writeScript(targetFullPath, transformed);
-        return targetFullPath;
     }
 
     async designFeature(title: string, description: string, requirements?: string[]): Promise<string> {
@@ -1515,20 +1446,34 @@ export class PawnManager {
             ? requirements.map(r => `  - ${r}`).join('\n')
             : '  - (none specified)';
 
+        const pat = await this.detectPatterns().catch(() => null);
+        const moduleMode = !!(pat && pat.hasSystemModules);
+        const slug = title.replace(/[^a-zA-Z0-9\u0E00-\u0E7F]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'feature';
+        const archIntro = moduleMode
+            ? `\n\n**Architecture**: this project builds features as self-contained system modules. Implement this feature as ONE module and register it in gamemodes/main.pwn — never add gameplay logic to main.pwn or create filterscripts for it.`
+            : '';
+        const archFiles = moduleMode
+            ? `- [ ] NEW module: gamemodes/includes/system/${slug}.inc (self-contained: state + hooks + commands + dialogs)\n- [ ] If this is a work/job feature: gamemodes/includes/system/job/j_${slug}.inc instead\n- [ ] Register it in gamemodes/main.pwn: #include "includes/system/${slug}.inc"\n- [ ] No filterscripts, no gameplay logic in main.pwn`
+            : `- [ ] Identify main script file\n- [ ] Identify include files needed\n- [ ] Identify filterscripts to create (if any)`;
+        const archEvents = moduleMode
+            ? `- [ ] hook OnGameModeInit: create static objects / 3D labels / start repeat timers\n- [ ] hook OnPlayerConnect: reset per-player state for this module\n- [ ] hook OnPlayerDisconnect: stop timers, clear transient state\n- [ ] hook OnPlayerKeyStateChange: KEY_NO actions guarded by IsPlayerInRangeOfPoint\n- [ ] hook OnProgressFinish: reward player, guarded by module state flag\n- [ ] Dialog:NAME for menus; CMD:name (with flags: for permissions) inside the module`
+            : `- [ ] OnGameModeInit / OnFilterScriptInit\n- [ ] OnPlayerConnect / OnPlayerDisconnect\n- [ ] OnPlayerDeath / OnPlayerSpawn\n- [ ] OnPlayerKeyStateChange / OnPlayerUpdate\n- [ ] Timers (SetTimer / SetTimerEx)\n- [ ] Commands (ZCMD / Pawn.CMD)`;
+        const archSteps = moduleMode
+            ? `1. Create the module file (path from section 3) starting with: #include <YSI_Coding\\y_hooks>\n2. Add module state, hook OnGameModeInit (objects/labels/timers) and hook OnPlayerConnect (reset)\n3. Interaction flow: hook OnPlayerKeyStateChange -> StartProgress(...) -> reward in hook OnProgressFinish\n4. Add CMD:name (flags: for admin) and Dialog:NAME inside the module\n5. Register in main.pwn: #include "includes/system/${slug}.inc" (match surrounding tab style)\n6. Verify: compile_pawn on gamemodes/main.pwn, then audit_script on the new module`
+            : `1. Step 1:\n2. Step 2:\n3. Step 3:`;
+
         const plan = `# Feature Plan: ${title}
 Generated: ${new Date().toISOString()}
 Status: PENDING_REVIEW
 
 ## 1. Overview
-${description}
+${description}${archIntro}
 
 ## 2. Explicit Requirements
 ${reqList}
 
 ## 3. Files to Create / Modify
-- [ ] Identify main script file
-- [ ] Identify include files needed
-- [ ] Identify filterscripts to create (if any)
+${archFiles}
 
 ## 4. Data Structures & Variables
 - [ ] Define enums/constants
@@ -1536,12 +1481,7 @@ ${reqList}
 - [ ] Define player variables (if using per-player data)
 
 ## 5. Event Handlers & Callbacks
-- [ ] OnGameModeInit / OnFilterScriptInit
-- [ ] OnPlayerConnect / OnPlayerDisconnect
-- [ ] OnPlayerDeath / OnPlayerSpawn
-- [ ] OnPlayerKeyStateChange / OnPlayerUpdate
-- [ ] Timers (SetTimer / SetTimerEx)
-- [ ] Commands (ZCMD / Pawn.CMD)
+${archEvents}
 
 ## 6. Edge Cases Checklist (CRITICAL)
 **Review every item before implementing:**
@@ -1555,9 +1495,7 @@ ${reqList}
 - [ ] **Thai text / Encoding**: All user-facing strings use correct encoding?
 
 ## 7. Implementation Steps
-1. Step 1:
-2. Step 2:
-3. Step 3:
+${archSteps}
 
 ## 8. Testing Checklist
 - [ ] Compile without errors
@@ -1577,6 +1515,66 @@ ${reqList}
         const bomPlan = '\uFEFF' + plan;
         await fs.writeFile(filepath, bomPlan, 'utf8');
         return filepath;
+    }
+
+    async moduleSkeleton(name: string, kind: 'module' | 'job' | 'autofarm' = 'module'): Promise<string> {
+        const p = await this.detectPatterns().catch(() => null);
+        const slugRaw = name.replace(/[^a-zA-Z0-9\u0E00-\u0E7F]+/g, '_').replace(/^_+|_+$/g, '');
+        const id = (slugRaw || 'feature').toLowerCase();
+        const Cap = id.charAt(0).toUpperCase() + id.slice(1);
+        const isJob = kind === 'job';
+        const fileName = (isJob ? 'j_' : '') + id;
+        const hasProg = !!(p && p.hasStartProgress);
+        const helpers = (p && p.messageHelpers) || [];
+        const mErr = helpers.indexOf('ErrorMsg') !== -1 ? 'ErrorMsg(playerid, "...")' : 'SendClientMessage(playerid, 0xFA0000FF, "...")';
+        const mOk = helpers.indexOf('ServerMsg') !== -1 ? 'ServerMsg(playerid, "...")' : 'SendClientMessage(playerid, 0x0060FFFF, "...")';
+
+        let s = '';
+        s += `// ${Cap} - ${kind === 'autofarm' ? 'collect / farm module' : 'self-contained system module'}\n`;
+        s += `// Put at: gamemodes/includes/${isJob ? 'system/job/' : 'system/'}${fileName}.inc\n`;
+        s += `// Register in gamemodes/main.pwn:\n`;
+        s += `// #include "includes/system/${isJob ? 'job/' : ''}${fileName}.inc"\n`;
+        s += `#include    <YSI_Coding\\y_hooks>\n\n`;
+        let state = `static\n    ${Cap}_Busy[MAX_PLAYERS]`;
+        if (!hasProg) state += `\n,   Timer: ${Cap}_Timer[MAX_PLAYERS]`;
+        s += state + '\n;\n\n';
+        s += `hook OnGameModeInit() {\n`;
+        s += `    // static world objects / labels and repeat timers for this feature\n`;
+        s += `    // e.g. Data[i][Obj] = CreateDynamicObject(...); Data[i][Lbl] = CreateDynamic3DTextLabel(...);\n`;
+        s += `    return 1;\n}\n\n`;
+        s += `hook OnPlayerConnect(playerid) {\n    ${Cap}_Busy[playerid] = 0;\n}\n\n`;
+        s += `hook OnPlayerDisconnect(playerid, reason) {\n    // stop ${Cap} timers / clear transient state\n    ${Cap}_Busy[playerid] = 0;\n    return 1;\n}\n\n`;
+        s += `hook OnPlayerKeyStateChange(playerid, newkeys, oldkeys) {\n`;
+        s += `    if (newkeys & KEY_NO && !IsPlayerInAnyVehicle(playerid)) {\n`;
+        s += `        // first verify the action point: if (IsPlayerInRangeOfPoint(playerid, 2.0, X, Y, Z))\n`;
+        s += `        if (${Cap}_Busy[playerid])\n            return ${mErr};\n`;
+        s += `        ${Cap}_Busy[playerid] = 1;\n`;
+        if (hasProg) {
+            s += `        StartProgress(playerid, "action in progress...", 1500, 0, INVALID_OBJECT_ID, COLOR_WHITE);\n`;
+        } else {
+            s += `        ${Cap}_Timer[playerid] = repeat ${Cap}_Tick(playerid);\n`;
+        }
+        s += `    }\n    return 1;\n}\n\n`;
+        if (hasProg) {
+            s += `hook OnProgressFinish(playerid, objectid) {\n`;
+            s += `    if (${Cap}_Busy[playerid]) {\n`;
+            s += `        ${Cap}_Busy[playerid] = 0;\n`;
+            s += `        // reward the player here (money / items / effect)\n`;
+            s += `        ${mOk};\n`;
+            s += `    }\n    return Y_HOOKS_CONTINUE_RETURN_0;\n}\n\n`;
+        } else {
+            s += `timer ${Cap}_Tick[100](playerid) {\n`;
+            s += `    if (${Cap}_Busy[playerid]) {\n`;
+            s += `        ${Cap}_Busy[playerid] = 0;\n`;
+            s += `        // reward the player here (money / items / effect)\n`;
+            s += `        ${mOk};\n`;
+            s += `    }\n    return 1;\n}\n\n`;
+        }
+        s += `// Commands & dialogs for this feature live INSIDE this module:\n`;
+        s += `// flags:${id}(CMD_LEAD_ADMIN)\n`;
+        s += `// CMD:${id}(playerid, params[]) { ... return 1; }\n`;
+        s += `// Dialog:DIALOG_${id.toUpperCase()}(playerid, response, listitem, inputtext[]) { ... }\n`;
+        return s;
     }
 
     async reviewImplementation(planPath: string, filesModified: string[]): Promise<string> {
@@ -1624,14 +1622,20 @@ ${unchecked.length > 0 || missingFiles.length > 0
         if (!this.serverRoot) return "No root set. Run set_server_root first.";
         
         const isThai = this.preferredEncoding === 'windows-874';
-                const cursorRules = `
-# CRITICAL: SAMP ENCODING RULES (MANDATORY)
+        const arch = await this.detectPatterns().catch(() => null);
+        const moduleMode = !!(arch && arch.hasSystemModules);
+        const archRuleCursor = moduleMode
+            ? '\r\n8. **ARCHITECTURE (system-module pattern)**: Build new features as ONE self-contained module under gamemodes/includes/system/<name>.inc (jobs: system/job/j_<name>.inc), owning its state/hooks/commands/dialogs via YSI y_hooks. Register it in gamemodes/main.pwn (#include "includes/system/<name>.inc"). Timed actions use StartProgress + hook OnProgressFinish, messages use ErrorMsg/ServerMsg/SyntaxMsg, per-player state uses PlayerInfo[playerid][pX] or static arrays. Never add gameplay logic to main.pwn or create filterscripts for features. Performance: foreach for player loops; YSI timers stopped on disconnect; threaded mysql_format + mysql_tquery only; Streamer dynamic objects; keep OnPlayerUpdate light.'
+            : '';
+        const archRuleSamp = moduleMode
+            ? '\r\n7. **ARCHITECTURE (SYSTEM-MODULE PATTERN)**:\r\n   - New features are ONE self-contained module: gamemodes/includes/system/<name>.inc (jobs -> system/job/j_<name>.inc), owning its state/hooks/commands/dialogs via YSI y_hooks.\r\n   - Register it in gamemodes/main.pwn with #include "includes/system/<name>.inc".\r\n   - Timed actions: StartProgress + hook OnProgressFinish. Messages: ErrorMsg/ServerMsg/SyntaxMsg. Per-player state: PlayerInfo[playerid][pX] or static arrays.\r\n   - No gameplay logic in main.pwn; no filterscripts for new features.'
+            : '';
+        const cursorRules = `
+# SAMP AI AGENT RULES (samp-mcp + file tools)
 
-1. **ENCODING**: This project uses **${isThai ? 'Thai (Windows-874)' : 'International'}** encoding. 
-2. **FORBIDDEN TOOLS**: NEVER use your built-in 'read_file', 'write_file', 'grep', or 'edit_file' tools on **.pwn** or **.inc** files. They WILL corrupt Thai characters (e.g. 'เธเธ').
-3. **MANDATORY TOOLS**: You **MUST** use 'samp-mcp' tools:
-   - Use 'read_pawn_script' to read.
-   - Use 'write_pawn_script' to write.
+1. **ENCODING**: This project uses **${isThai ? 'Thai (Windows-874)' : 'International'}** encoding. Keep it byte-for-byte.
+2. **FILE TOOLS**: Use encoding-aware file tools (e.g., mcp-file-tools) for ALL file reads/writes/edits — they auto-detect and preserve Windows-874 Thai and CRLF. NEVER re-save scripts with plain editors.
+3. **SAMP-MCP SCOPE**: samp-mcp handles SAMP server operations only (status/RCON/compile/audits), not file editing.
 4. **NO TRANSLATION**: Maintain the project's primary language.
 5. **PLANNING RULE (CRITICAL)**: 
    - Before implementing ANY new feature or system, you **MUST** use 'design_feature' to create a structured plan.
@@ -1647,19 +1651,15 @@ ${unchecked.length > 0 || missingFiles.length > 0
    - Only comment on complex logic or non-obvious decisions.
    - **ASK the user** "ต้องการ comment อธิบายโค้ดด้วยไหม?" before adding detailed comments.
    - Never comment every single line (e.g. \`// increment i\` on \`i++\`).
-
-FAILURE TO FOLLOW THESE RULES WILL RESULT IN PERMANENT DATA CORRUPTION.
+${archRuleCursor}
+When Thai shows garbled, stop and re-check the file's real encoding with an encoding-aware tool before writing anything.
 `;
         const sampRules = `# SAMP Project Rules (Universal)
-MANDATORY for Windsurf, Cursor, Antigravity, and all AI Agents:
+For Windsurf, Cursor, Antigravity, and all AI agents:
 
-1. **ENCODING (CRITICAL)**:
-   - This project uses **${isThai ? 'Thai (Windows-874)' : 'Universal Auto-Detection'}**.
-   - **NEVER** use built-in tools like 'read_file', 'write_file', or 'grep' on .pwn or .inc files.
-   - **MANDATORY**: You **MUST** use the following SAMP-MCP tools:
-     - 'read_pawn_script': To read source code safely.
-     - 'write_pawn_script': To save code without corruption.
-     - 'fix_script_encoding': Use immediately if you see garbage (เธเธ) in any file.
+1. **ENCODING**: This project uses **${isThai ? 'Thai (Windows-874)' : 'Universal Auto-Detection'}**.
+   - Use encoding-aware file tools (e.g., mcp-file-tools) for ALL file reads/writes/edits so Thai (Windows-874) and CRLF line endings are preserved.
+   - samp-mcp is for SAMP server operations only (status/RCON/compile/audits) — it does not edit script files.
 
 2. **LANGUAGE PRESERVATION**:
    - **DO NOT** translate strings. Maintain the original project language.
@@ -1682,8 +1682,8 @@ MANDATORY for Windsurf, Cursor, Antigravity, and all AI Agents:
 
 6. **COMPILATION**:
    - Use 'compile_and_load_pawn' to verify changes and reload server.
-
-FAILURE TO USE SAMP-MCP TOOLS WILL CAUSE PERMANENT DATA CORRUPTION.
+${archRuleSamp}
+If Thai ever shows garbled, stop and verify the file's encoding with an encoding-aware tool before writing.
 `;
 
         await fs.writeFile(path.join(this.serverRoot, 'AI_RULES.md'), cursorRules, 'utf8');
@@ -1695,14 +1695,17 @@ FAILURE TO USE SAMP-MCP TOOLS WILL CAUSE PERMANENT DATA CORRUPTION.
     async getFormattedGuidelines(): Promise<string> {
         const p = await this.detectPatterns();
         const isThai = this.preferredEncoding === 'windows-874';
+        const archRule = p.hasSystemModules
+            ? `\n5. **ARCHITECTURE (system-module pattern detected)**:\n   - Build every new feature as ONE self-contained module: gamemodes/includes/system/<name>.inc (jobs go to gamemodes/includes/system/job/j_<name>.inc).\n   - The module owns its state/hooks/commands/dialogs. Start with #include <YSI_Coding\\y_hooks>, then wire it through hook OnGameModeInit / OnPlayerConnect / OnPlayerDisconnect / OnPlayerKeyStateChange.\n   - Register the module in gamemodes/main.pwn: #include "includes/system/<name>.inc" (match the surrounding tab style).\n   - Timed actions: StartProgress(playerid, "label", ms, 0, objectid, color) then reward inside hook OnProgressFinish guarded by the module's state flag.\n   - Messages via ErrorMsg / ServerMsg / SyntaxMsg macros; per-player state in PlayerInfo[playerid][pX] or static arrays (new X[MAX_PLAYERS]).\n   - Never put gameplay logic in main.pwn and never create filterscripts for new features.\n   - Commands are Pawn.CMD: CMD:name(playerid, params[]) inside the module, plus flags:name(CMD_xxx) when admin-gated (permission bits are auto-checked vs PlayerInfo[playerid][pCMDPermission] in OnPlayerCommandReceived).\n   - Dialogs are easyDialog: Dialog_Show(playerid, DIALOG_X, DIALOG_STYLE_INPUT, caption, "...", "OK", "Cancel") and the handler Dialog:DIALOG_X(playerid, response, listitem, inputtext[]).\n   - PERFORMANCE (mirrors this codebase): iterate connected players with foreach(new i : Player), never for (i < MAX_PLAYERS); use YSI timers (timer X[1000] / repeat) and stop/clean them on disconnect; all MySQL is threaded via mysql_format + mysql_tquery(g_SQL, query, "Callback", ...) reading cache_* inside the callback — never blocking mysql_query; world objects/labels are Streamer dynamic (CreateDynamicObject / CreateDynamic3DTextLabel); keep OnPlayerUpdate and per-player fast callbacks light; size strings realistically and prefer static for big buffers.`
+            : '';
         
         return `
-# UNIVERSAL RULES FOR ALL AI AGENTS (SAMP-MCP)
+# SAMP PROJECT RULES FOR AI AGENTS (samp-mcp + mcp-file-tools)
 
-1. **ENCODING (CRITICAL)**:
-   - This project uses **${isThai ? 'Thai (Windows-874)' : 'International (UTF-8)'}** encoding.
-   - Standard file tools (view_file, write_file) **WILL** corrupt Thai characters if present.
-   - You **MUST** use 'read_pawn_script' and 'write_pawn_script' for all .pwn and .inc files.
+1. **ENCODING**:
+   - This project uses **${isThai ? 'Thai (Windows-874)' : 'International (auto-detected)'}** encoding.
+   - All file reads/writes/edits go through encoding-aware file tools (e.g., mcp-file-tools) that detect and preserve the real encoding (Windows-874 Thai, CRLF). Never re-save or transcode scripts with plain editors.
+   - samp-mcp is for SAMP server operations only (status/query, RCON, compile, audits) — it does not edit script files.
 
 2. **LANGUAGE PRESERVATION**:
    - **DO NOT** translate existing strings. 
@@ -1710,15 +1713,17 @@ FAILURE TO USE SAMP-MCP TOOLS WILL CAUSE PERMANENT DATA CORRUPTION.
    - If the project is Thai, stay in Thai. If it is English, stay in English.
 
 3. **CORRUPTION RECOVERY**:
-   ${isThai ? "- If you see garbled text (???? or ยยกต), use 'fix_script_encoding' immediately." : "- Ensure you don't introduce encoding mismatches."}
+   ${isThai ? "- If Thai shows as garbage, stop: re-read with an encoding-aware tool (e.g., mcp-file-tools) and verify the file was not re-saved as UTF-8 before editing." : "- Ensure you don't introduce encoding mismatches."}
 
 4. **PROJECT CONTEXT**:
    - Thai Support: ${p.thaiSupport ? 'YES' : 'NO'}
    - Preferred Encoding: ${this.preferredEncoding}
    - Logic Style: ${p.hasYSI ? 'YSI (Hooks enabled)' : 'Standard'}
    - Commands: ${p.hasPawnCMD ? 'Pawn.CMD' : (p.hasZCMD ? 'ZCMD' : 'Standard')}
+   - Architecture: ${p.hasSystemModules ? `System Modules (${p.systemModuleCount} in gamemodes/includes/system)` : 'Monolithic / Classic'}
+${archRule}
 
-5. **CODE STYLE**:
+${p.hasSystemModules ? '6' : '5'}. **CODE STYLE**:
    - Group declarations: \`new a, b, c;\` NOT multiple \`new\` lines.
    - Compact calls: single line when fits ~80-100 chars.
    - Minimal comments: only complex logic, never obvious ones.

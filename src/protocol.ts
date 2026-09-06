@@ -1,10 +1,8 @@
 import * as iconv from 'iconv-lite';
 
-export type PacketType = 'i' | 'c' | 'r' | 'd' | 'x' | 'p';
+export type PacketType = 'i' | 'r' | 'd' | 'x';
 
 export class SampProtocol {
-    private static HEADER = Buffer.from('SAMP');
-
     static buildPacket(ip: string, port: number, type: PacketType, payload?: Buffer): Buffer {
         const ipParts = ip.split('.').map(p => parseInt(p, 10));
         const header = Buffer.alloc(11);
@@ -44,28 +42,10 @@ export class SampProtocol {
     static parseResponse(buffer: Buffer, type: PacketType): any {
         // Basic check
         if (buffer.length < 11) return null;
-        const responseType = String.fromCharCode(buffer[10]);
         const payload = buffer.subarray(11);
 
         if (type === 'x') {
             return iconv.decode(payload, 'windows-874').trim();
-        }
-
-        if (type === 'c') {
-            // Player list (Basic)
-            if (payload.length < 2) return [];
-            let offset = 0;
-            const count = payload.readUInt16LE(offset); offset += 2;
-            const players = [];
-            for (let i = 0; i < count; i++) {
-                if (payload.length < offset + 1) break;
-                const nameLen = payload[offset++];
-                if (payload.length < offset + nameLen + 4) break;
-                const name = iconv.decode(payload.subarray(offset, offset + nameLen), 'windows-874'); offset += nameLen;
-                const score = payload.readInt32LE(offset); offset += 4;
-                players.push({ name, score });
-            }
-            return players;
         }
 
         if (type === 'd') {

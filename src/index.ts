@@ -3,22 +3,15 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import * as dotenv from 'dotenv';
+import { readFile } from 'fs/promises';
 import { SampClient } from './client.js';
 import { PawnManager } from './scripts.js';
 
-// Silence dotenv output that can break MCP JSON-RPC
+// dotenv quiet mode keeps JSON-RPC on stdout clean
 process.env.DOTENV_CONFIG_QUIET = 'true';
-const originalLog = console.log;
-console.log = (...args: any[]) => {
-  if (typeof args[0] === 'string' && (args[0].includes('[dotenv]') || args[0].includes('injecting env'))) {
-    return;
-  }
-  originalLog.apply(console, args);
-};
 dotenv.config({ quiet: true });
-console.log = originalLog;
 
-const APP_VERSION = "1.0.10";
+const APP_VERSION = "1.0.11";
 
 const server = new McpServer({
   name: "samp-mcp-server",
@@ -60,6 +53,7 @@ async function updateConnection(root: string, hostOverride?: string, portOverrid
     const port = portOverride || detected.port;
     const password = passOverride || detected.password;
     
+    client?.close(); // close previous socket before replacing
     client = new SampClient(host, port, password);
     console.error(`Connected to SAMP server at: ${root} (Host: ${host}, Port: ${port})`);
     return { root, port, password };
@@ -67,12 +61,22 @@ async function updateConnection(root: string, hostOverride?: string, portOverrid
 
 async function getTempClient(address?: string): Promise<SampClient> {
     if (address) {
-        let [host, portStr] = address.split(':');
-        let port = portStr ? parseInt(portStr, 10) : 7777;
+        const [host, portStr] = address.split(':');
+        const port = portStr ? parseInt(portStr, 10) : 7777;
         return new SampClient(host, port);
     }
     ensureRoot();
     return client!;
+}
+
+// Run a query against the project client or a temp client (closed afterwards to avoid socket leaks)
+async function queryClient<T>(address: string | undefined, fn: (c: SampClient) => Promise<T>): Promise<T> {
+    const c = await getTempClient(address);
+    try {
+        return await fn(c);
+    } finally {
+        if (address) c.close();
+    }
 }
 
 // Tool: Set Server Root (THE NEW CORE TOOL)
@@ -92,7 +96,7 @@ server.tool(
       return {
         content: [{ 
           type: "text", 
-          text: `Successfully connected to ${path}. Host: ${client?.host}, Port: ${info.port}.\n\nSYSTEM RULES FOR THIS PROJECT (MANDATORY):\n${rules}\n\nAI AGENT: You are now bound by these rules. Do not use standard file tools.` 
+          text: `Successfully connected to ${path}. Host: ${client?.host}, Port: ${info.port}.${p.hasSystemModules ? `\nArchitecture: module-based system (${p.systemModuleCount} modules under gamemodes/includes/system). Design new features as ONE self-contained .inc module there and register it in main.pwn — never as filterscripts.` : ''}\n\nSYSTEM RULES FOR THIS PROJECT (MANDATORY):\n${rules}\n\nAI AGENT: Follow these rules. samp-mcp is for SAMP server operations (query/RCON/compile/audit); all file read/write/edit must go through encoding-aware file tools (e.g., mcp-file-tools) so Windows-874 Thai and CRLF line endings are preserved.` 
         }]
       };
     } catch (error: any) {
@@ -139,8 +143,7 @@ server.tool(
   { address: z.string().optional().describe("Optional host:port to query instead of the project server") },
   async ({ address }) => {
     try {
-      const targetClient = await getTempClient(address);
-      const stats = await targetClient.getInfo();
+      const stats = await queryClient(address, (c) => c.getInfo());
       return {
         content: [{ type: "text", text: JSON.stringify(stats, null, 2) }]
       };
@@ -160,8 +163,7 @@ server.tool(
   { address: z.string().optional().describe("Optional host:port to query instead of the project server") },
   async ({ address }) => {
     try {
-      const targetClient = await getTempClient(address);
-      const players = await targetClient.getPlayers();
+      const players = await queryClient(address, (c) => c.getPlayers());
       return {
         content: [{ type: "text", text: JSON.stringify(players, null, 2) }]
       };
@@ -181,8 +183,7 @@ server.tool(
   { address: z.string().optional().describe("Optional host:port to query instead of the project server") },
   async ({ address }) => {
     try {
-      const targetClient = await getTempClient(address);
-      const rules = await targetClient.getRules();
+      const rules = await queryClient(address, (c) => c.getRules());
       return {
         content: [{ type: "text", text: JSON.stringify(rules, null, 2) }]
       };
@@ -229,51 +230,6 @@ server.tool(
   }
 );
 
-// Tool: Read Server Log
-server.tool(
-  "read_server_log",
-  "Read the last N lines of the SAMP server_log.txt",
-  { limit: z.number().optional().default(50).describe("Number of lines to read") },
-  async ({ limit }) => {
-    try {
-      ensureRoot();
-      const log = await pawn.readServerLog(limit);
-      return {
-        content: [{ type: "text", text: log }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Search Server Log
-server.tool(
-  "search_server_log",
-  "Search for specific keywords (e.g., 'Error', 'Crash', 'Failed') in server_log.txt",
-  { 
-    query: z.string().describe("Keyword to search for"),
-    limit: z.number().optional().default(100).describe("Number of lines to scan from the end")
-  },
-  async ({ query, limit }) => {
-    try {
-      ensureRoot();
-      const matches = await pawn.searchServerLog(query, limit);
-      return {
-        content: [{ type: "text", text: matches.join('\n') || "No matches found." }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
 // Tool: Get Server Diagnostics
 server.tool(
   "get_server_diagnostics",
@@ -295,297 +251,6 @@ server.tool(
 
       return {
         content: [{ type: "text", text: JSON.stringify(summary, null, 2) }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Read server.cfg
-server.tool(
-  "read_server_cfg",
-  "Read the SAMP server.cfg configuration file.",
-  {},
-  async () => {
-    try {
-      ensureRoot();
-      const content = await pawn.readConfig();
-      return {
-        content: [{ type: "text", text: content }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Write server.cfg
-server.tool(
-  "write_server_cfg",
-  "Write/Update the entire SAMP server.cfg configuration file.",
-  { content: z.string().describe("Full content of the server.cfg file") },
-  async ({ content }) => {
-    try {
-      ensureRoot();
-      await pawn.writeConfig(content);
-      return {
-        content: [{ type: "text", text: `Successfully updated server.cfg` }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Update server.cfg key
-server.tool(
-  "update_server_cfg",
-  "Update a specific key in server.cfg (e.g., 'hostname', 'maxplayers').",
-  { 
-    key: z.string().describe("The configuration key to update"),
-    value: z.string().describe("The new value for the key")
-  },
-  async ({ key, value }) => {
-    try {
-      ensureRoot();
-      await pawn.updateConfig(key, value);
-      return {
-        content: [{ type: "text", text: `Successfully updated ${key} in server.cfg` }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: List Server Files
-server.tool(
-  "list_server_files",
-  "List files in a SAMP server subdirectory (gamemodes, plugins, include, etc.) Use this to find .pwn and .inc source files.",
-  { subdir: z.string().describe("Subdirectory to list") },
-  async ({ subdir }) => {
-    try {
-      ensureRoot();
-      const files = await pawn.listDirectory(subdir);
-      return {
-        content: [{ type: "text", text: files.join('\n') }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Read SAMP Source (.pwn, .inc)
-server.tool(
-  "read_pawn_script",
-  "MANDATORY: ALWAYS use this for .pwn/.inc files. It is the ONLY safe way to handle encoding and language. Standard tools WILL corrupt files. Optionally read only a specific line range (1-indexed).",
-  { 
-    path: z.string().describe("Path to the file"),
-    encoding: z.string().optional().describe("Override encoding (defaults to project's auto-detected encoding)"),
-    startLine: z.number().optional().describe("First line to read (1-indexed). Omit to read from the start."),
-    endLine: z.number().optional().describe("Last line to read (1-indexed). Omit to read to the end.")
-  },
-  async ({ path, encoding, startLine, endLine }) => {
-    try {
-      ensureRoot();
-      const content = await pawn.readScript(path, encoding, startLine, endLine);
-      return {
-        content: [{ type: "text", text: content }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Write SAMP Source (.pwn, .inc)
-server.tool(
-  "write_pawn_script",
-  "MANDATORY: ALWAYS use this for .pwn/.inc files. It is the ONLY safe way to handle encoding and language. Standard tools WILL corrupt files. CRITICAL: When replacing a line range, ALWAYS provide BOTH startLine AND endLine. Providing only startLine replaces only that single line.",
-  {
-    path: z.string().describe("Path to the file"),
-    content: z.string().describe("Content to write"),
-    encoding: z.string().optional().describe("Override encoding (defaults to project's auto-detected encoding)"),
-    startLine: z.number().optional().describe("First line to replace (1-indexed). Omit to overwrite the entire file."),
-    endLine: z.number().optional().describe("Last line to replace (1-indexed). MUST be >= startLine. Omitting this with startLine set replaces ONLY that single line, NOT to end of file.")
-  },
-  async ({ path, content, encoding, startLine, endLine }) => {
-    try {
-      ensureRoot();
-      const backupResult = await pawn.writeScript(path, content, encoding, startLine, endLine);
-      const scope = startLine !== undefined ? ` (lines ${startLine}-${endLine || startLine})` : '';
-      return {
-        content: [
-          { type: "text", text: `Successfully wrote to ${path}${scope}` },
-          { type: "text", text: `Backup: ${backupResult}` }
-        ]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Search in Pawn Scripts
-server.tool(
-  "search_pawn_script",
-  "Search for text inside .pwn/.inc files across the entire project. Returns file paths, line numbers, and surrounding context. Much more efficient than reading entire files.",
-  {
-    query: z.string().describe("Text to search for (case-insensitive)"),
-    maxResults: z.number().optional().default(10).describe("Max number of matches to return"),
-    contextLines: z.number().optional().default(3).describe("Number of surrounding lines to show per match")
-  },
-  async ({ query, maxResults, contextLines }) => {
-    try {
-      ensureRoot();
-      const results = await pawn.searchScript(query, maxResults, contextLines);
-      return {
-        content: [{ type: "text", text: results }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Fuzzy Find File
-server.tool(
-  "fuzzy_find_file",
-  "Find .pwn/.inc/.cfg files by partial name match. Useful when you can't remember the exact file path.",
-  {
-    name: z.string().describe("Partial filename to search for (e.g. 'main', 'airdrop')"),
-    maxResults: z.number().optional().default(5).describe("Max results to return")
-  },
-  async ({ name, maxResults }) => {
-    try {
-      ensureRoot();
-      const results = await pawn.fuzzyFindFile(name, maxResults);
-      return {
-        content: [{ type: "text", text: results }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Get Function Body
-server.tool(
-  "get_function_body",
-  "Extract the complete body of a function by name from a .pwn/.inc file. Much more efficient than reading the entire file. Returns only the function code with optional doc comments.",
-  {
-    path: z.string().describe("Path to the .pwn/.inc file"),
-    functionName: z.string().describe("Name of the function to extract"),
-    includeDoc: z.boolean().optional().default(false).describe("Include doc comments above the function")
-  },
-  async ({ path, functionName, includeDoc }) => {
-    try {
-      ensureRoot();
-      const results = await pawn.getFunctionBody(path, functionName, includeDoc);
-      return {
-        content: [{ type: "text", text: results }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Restore Pawn Script
-server.tool(
-  "restore_pawn_script",
-  "Restore a .pwn/.inc file from its latest backup (or a specific backup). Use this as 'undo' when a write goes wrong.",
-  {
-    path: z.string().describe("Path to the file to restore"),
-    backupName: z.string().optional().describe("Optional specific backup filename to restore from. If omitted, restores the latest backup.")
-  },
-  async ({ path, backupName }) => {
-    try {
-      ensureRoot();
-      const result = await pawn.restoreScript(path, backupName);
-      return {
-        content: [{ type: "text", text: result }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: List Backups
-server.tool(
-  "list_backups",
-  "List available backups for a specific file or all files in the project.",
-  {
-    path: z.string().optional().describe("Optional file path to filter backups for a specific file")
-  },
-  async ({ path }) => {
-    try {
-      ensureRoot();
-      const backups = await pawn.listBackups(path);
-      if (backups.length === 0) {
-        return {
-          content: [{ type: "text", text: "No backups found." }]
-        };
-      }
-      return {
-        content: [{ type: "text", text: JSON.stringify(backups, null, 2) }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Fix Script Encoding
-server.tool(
-  "fix_script_encoding",
-  "Fix encoding corruption in a .pwn/.inc file. If another AI saved Thai text as UTF-8 (causing garbled characters like ยยกต), this tool converts it back to the correct Windows-874 encoding.",
-  { path: z.string().describe("Path to the corrupted file") },
-  async ({ path }) => {
-    try {
-      ensureRoot();
-      const result = await pawn.fixScriptEncoding(path);
-      return {
-        content: [{ type: "text", text: result }]
       };
     } catch (error: any) {
       return {
@@ -620,78 +285,44 @@ server.tool(
   }
 );
 
-// Tool: List Includes
-server.tool(
-  "list_includes",
-  "List available .inc files in pawno/include and other common paths.",
-  {},
-  async () => {
-    try {
-      ensureRoot();
-      const includes = await pawn.listIncludes();
-      return {
-        content: [{ type: "text", text: includes.join('\n') || "No includes found." }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Tool: Read Include
-server.tool(
-  "read_include",
-  "Read a .inc file from the include directories (Thai support).",
-  { name: z.string().describe("Name of the include file (e.g., 'sscanf2' or 'zcmd.inc')") },
-  async ({ name }) => {
-    try {
-      ensureRoot();
-      const content = await pawn.readInclude(name);
-      return {
-        content: [{ type: "text", text: content }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
 // Tool: Generate Boilerplate
 server.tool(
   "generate_boilerplate",
-  "Generate SAMP code snippets. Automatically detects if the project is Thai and provides Thai strings if so. DO NOT TRANSLATE generated Thai strings.",
+  "Generate SAMP code snippets / system-module skeletons that match the connected project architecture (CareerCity-style includes/system modules when detected). Use type 'module' for a full feature module, 'job'/'autofarm' for those module kinds, or 'command'/'dialog' for small blocks. DO NOT TRANSLATE generated Thai strings.",
   { 
-    type: z.enum(["command", "dialog", "job", "autofarm"]).describe("Type of snippet to generate"),
+    type: z.enum(["command", "dialog", "module", "job", "autofarm"]).describe("Type of snippet to generate (module/job/autofarm produce full system-module skeletons)"),
     name: z.string().describe("Name of the command/dialog/job/item")
   },
   async ({ type, name }) => {
     ensureRoot();
     const p = await pawn.detectPatterns();
+    const moduleMode = !!p.hasSystemModules;
     let snippet = "";
-    
-    if (type === "command") {
-      if (p.hasPawnCMD) {
+
+    if (moduleMode && (type === "module" || type === "job" || type === "autofarm")) {
+      snippet = await pawn.moduleSkeleton(name, type);
+    } else if (type === "module") {
+      snippet = `// ${name}\n// Classic project (no gamemodes/includes/system): full-module boilerplate only applies to\n// CareerCity-style module projects. Use type command/dialog/job/autofarm instead.`;
+    } else if (type === "command") {
+      if (!moduleMode && p.hasPawnCMD) {
         snippet = `PCMD:${name}(playerid, params[])\n{\n    // Pawn.CMD style\n    return 1;\n}`;
       } else {
-        snippet = `CMD:${name}(playerid, params[])\n{\n    // ZCMD style\n    return 1;\n}`;
+        snippet = `CMD:${name}(playerid, params[])\n{\n    // ${moduleMode ? 'Command inside its system module' : 'ZCMD style'}\n    return 1;\n}`;
       }
     } else if (type === "dialog") {
       snippet = `Dialog:DIALOG_${name.toUpperCase()}(playerid, response, listitem, inputtext[])\n{\n    if (response)\n    {\n        // Handle response\n    }\n    return 1;\n}`;
-    } else if (type === "job") {
-      snippet = `// Job: ${name}\n${p.hasYSI ? 'hook ' : ''}OnPlayerKeyStateChange(playerid, newkeys, oldkeys)\n{\n    if (newkeys & KEY_NO)\n    {\n        // Start job action\n    }\n    return 1;\n}`;
-    } else if (type === "autofarm") {
-      const upperName = name.toUpperCase();
-      snippet = `${p.hasYSI ? '#include <YSI_Coding\\y_hooks>\n#include <YSI_Coding\\y_timers>\n' : ''}\n#define     MAX_${upperName}          10\n#define     ${upperName}OBJECT        19129\n#define     ${upperName}TEXT           "{FFFFFF}กด {FFFF00}N {FFFFFF}เพื่อเก็บ ${name}"\n#define     ${upperName}NAME           "${name}"\n\n${p.hasYSI ? 'hook ' : ''}OnPlayerKeyStateChange(playerid, newkeys, oldkeys)\n{\n    if (newkeys & KEY_NO)\n    {\n        // Add ${name} collection logic here\n        // Use AutoFarm_WalkAnimation(playerid);\n    }\n    return 1;\n}`;
+    } else if (type === "job" || type === "autofarm") {
+      snippet = `// ${name}\n${p.hasYSI ? 'hook ' : ''}OnPlayerKeyStateChange(playerid, newkeys, oldkeys)\n{\n    if (newkeys & KEY_NO)\n    {\n        // Add ${name} logic here\n    }\n    return 1;\n}`;
     }
 
+    const slug = name.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+    const isModuleKind = moduleMode && (type === "module" || type === "job" || type === "autofarm");
+    const hint = isModuleKind
+      ? `\n\n// Put at: gamemodes/includes/${type === 'job' ? `system/job/j_${slug}.inc` : `system/${slug}.inc`}\n// Register in gamemodes/main.pwn: #include "includes/system/${type === 'job' ? `job/j_${slug}.inc` : `${slug}.inc`}"`
+      : '';
+
     return {
-      content: [{ type: "text", text: snippet }]
+      content: [{ type: "text", text: snippet + hint }]
     };
   }
 );
@@ -718,14 +349,19 @@ server.tool(
 - **Callback Hooks**: ${p.hasYSI ? 'YSI Hooks (use hook OnPlayer...)' : 'Standard Callbacks'}
 - **Database**: ${p.hasMySQL ? 'MySQL detected' : 'No MySQL detected'}
 - **Streamer**: ${p.hasStreamer ? 'Streamer Plugin detected' : 'No Streamer detected'}
+- **Architecture**: ${p.hasSystemModules ? `System Modules (${p.systemModuleCount} modules under gamemodes/includes/system)` : 'Monolithic / Classic'}
 
 ## Standards:
-1. **Encoding**: ALWAYS use \`write_pawn_script\` for .pwn and .inc files to support Thai (windows-874).
+1. **Encoding**: Files use Thai (windows-874) / auto-detected encodings. Use encoding-aware file tools (e.g., mcp-file-tools) for ALL .pwn and .inc file reads/writes/edits.
 2. **Boilerplate**: Use \`generate_boilerplate\` to get the correct structure for this project.
 `;
 
     if (p.hasYSI) {
       guide += `\n- **Note**: This project uses YSI. Always include <YSI_Coding\\y_hooks> when creating new modules.\n`;
+    }
+
+    if (p.hasSystemModules) {
+      guide += `\n## Adding a New System (module pattern)\n- Create ONE self-contained module: gamemodes/includes/system/<name>.inc (jobs -> system/job/j_<name>.inc).\n- The module owns its state/hooks/commands/dialogs: start with #include <YSI_Coding\\y_hooks>, then hook OnGameModeInit / OnPlayerConnect / OnPlayerDisconnect / OnPlayerKeyStateChange.\n- Register it in gamemodes/main.pwn: #include "includes/system/<name>.inc".\n- Timed actions: StartProgress(...) then reward inside hook OnProgressFinish guarded by the module's state flag.\n- Messages: ErrorMsg / ServerMsg / SyntaxMsg. Per-player state: PlayerInfo[playerid][pX] or static arrays.\n- Use generate_boilerplate (type=module/job/autofarm) and design_feature to get matching module-aware output.\n`;
     }
 
     return {
@@ -851,6 +487,32 @@ server.tool(
   }
 );
 
+// Tool: Study Project (self-analyzing gamemode docs)
+server.tool(
+  "study_project",
+  "Deep-study the connected gamemode itself: parses the main script include graph, detects libraries, command/dialog/message/state conventions, timer & MySQL & loop patterns, captures verbatim code idioms, and writes a per-project markdown study (SAMP_STUDY.md in the server root). Generic — works for any gamemode environment. Re-run to regenerate.",
+  {},
+  async () => {
+    try {
+      ensureRoot();
+      const outPath = await pawn.studyProject();
+      const fs = await import('fs');
+      const content = fs.readFileSync(outPath, 'utf8');
+      return {
+        content: [
+          { type: "text", text: `Study written to: ${outPath}` },
+          { type: "text", text: content.length > 9000 ? content.slice(0, 9000) + "\n... (truncated — full study at " + outPath + ")" : content }
+        ]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
 // Tool: Check Includes
 server.tool(
   "check_includes",
@@ -901,8 +563,13 @@ server.tool(
     try {
       ensureRoot();
       const msg = await pawn.injectCode(code);
+      let extra = "";
+      if (client?.password) {
+        const resp = await client.executeRcon('loadfs mcp_test');
+        extra = resp.join('\n') ? `\nloadfs result: ${resp.join('\n')}` : '\nFilterScript loaded via RCON (loadfs mcp_test).';
+      }
       return {
-        content: [{ type: "text", text: msg }]
+        content: [{ type: "text", text: msg + extra }]
       };
     } catch (error: any) {
       return {
@@ -955,22 +622,6 @@ server.tool(
   }
 );
 
-// Tool: Search SAMP Resources (Wiki/Forum)
-server.tool(
-  "search_samp_resources",
-  "Search the official SAMP Wiki and Forum Archive for information/examples.",
-  { query: z.string().describe("Search keywords") },
-  async ({ query }) => {
-    // This is a placeholder for AI to use search_web with context
-    return {
-      content: [{ 
-        type: "text", 
-        text: `Please use the 'search_web' tool with the following query for better results: "site:sampwiki.blast.hk ${query}" OR "site:sampforum.blast.hk ${query}"` 
-      }]
-    };
-  }
-);
-
 // Tool: Get Snippet
 server.tool(
   "get_snippet",
@@ -994,32 +645,6 @@ server.tool(
 );
 
 
-
-// Tool: Transform Pawn Script
-server.tool(
-  "transform_pawn_script",
-  "Clone and refactor a script (e.g. Juice -> Watermelon). MANDATORY for Thai projects to preserve encoding. DO NOT TRANSLATE Thai strings during transformation.",
-  {
-    sourcePath: z.string().describe("Path to the original .pwn or .inc file"),
-    targetName: z.string().describe("New name for the file (e.g. 'auto_watermelon')"),
-    oldTheme: z.string().describe("The word to replace (e.g., 'Juice')"),
-    newTheme: z.string().describe("The replacement word (e.g., 'Watermelon')")
-  },
-  async ({ sourcePath, targetName, oldTheme, newTheme }) => {
-    try {
-      ensureRoot();
-      const newPath = await pawn.transformScript(sourcePath, targetName, oldTheme, newTheme);
-      return {
-        content: [{ type: "text", text: `Successfully transformed script to: ${newPath}` }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
 
 // Tool: Install Plugin
 server.tool(
@@ -1134,27 +759,6 @@ server.tool(
   }
 );
 
-// Tool: Extract Strings
-server.tool(
-  "extract_strings",
-  "Scan a script for all string literals. Useful for localization or cleanup.",
-  { path: z.string().describe("Path to the script file") },
-  async ({ path }) => {
-    try {
-      ensureRoot();
-      const strings = await pawn.extractStrings(path);
-      return {
-        content: [{ type: "text", text: JSON.stringify(strings, null, 2) }]
-      };
-    } catch (error: any) {
-      return {
-        content: [{ type: "text", text: `Error: ${error.message}` }],
-        isError: true
-      };
-    }
-  }
-);
-
 // Tool: Get Dashboard
 server.tool(
   "get_dashboard",
@@ -1162,8 +766,7 @@ server.tool(
   { address: z.string().optional().describe("Optional host:port to query instead of the project server") },
   async ({ address }) => {
     try {
-      const targetClient = await getTempClient(address);
-      const dash = await pawn.getDashboard(targetClient);
+      const dash = await queryClient(address, (c) => pawn.getDashboard(c));
       return {
         content: [{ type: "text", text: JSON.stringify(dash, null, 2) }]
       };
@@ -1256,7 +859,7 @@ server.tool(
       ensureRoot();
       const planPath = await pawn.designFeature(title, description, requirements);
       // Read the plan back so the user can review it inline
-      const planContent = await pawn.readScript(planPath, 'utf8');
+      const planContent = await readFile(planPath, 'utf8');
       return {
         content: [
           { type: "text", text: `Plan created: ${planPath}` },
@@ -1311,11 +914,11 @@ server.prompt(
           type: "text",
           text: `You are now a SAMP Developer. This project uses ${isThai ? 'Thai (Windows-874)' : 'International'} encoding.
           
-CRITICAL RULES:
-1. NEVER use your built-in 'read_file' or 'write_file' tools for .pwn or .inc files. They WILL corrupt the project.
-2. ALWAYS use the 'aaa_mandatory_read_first_guidelines' tool to see the full rules.
-3. ALWAYS use 'read_pawn_script' and 'write_pawn_script' for all script operations.
-4. If you see 'เธเธ' or garbage, use 'fix_script_encoding' immediately.`
+GUIDELINES:
+1. samp-mcp handles SAMP server operations only (status, RCON, compile, audits).
+2. For ALL file reads/writes/edits on .pwn/.inc/.cfg/logs, use encoding-aware file tools (e.g., mcp-file-tools) — never plain editors that would corrupt Windows-874 Thai.
+3. Use the 'aaa_mandatory_read_first_guidelines' tool to see the full project rules.
+4. Keep the original language — do NOT translate existing strings.${p.hasSystemModules ? `\n5. When building NEW systems/features, follow the project's module pattern: ONE module under gamemodes/includes/system (use generate_boilerplate type=module/job/autofarm and design_feature, which now emit module-aware plans), register it in gamemodes/main.pwn, and never put gameplay logic in main.pwn.` : ''}`
         }
       }]
     };
@@ -1325,10 +928,9 @@ CRITICAL RULES:
 // Tool: AAA Mandatory Read First Guidelines
 server.tool(
   "aaa_mandatory_read_first_guidelines",
-  "CRITICAL: Call this FIRST. Returns the mandatory encoding and language rules for this specific SAMP project.",
+  "Call this FIRST. Returns the project's encoding rules and AI-agent workflow guidelines.",
   {},
   async () => {
-    const p = await pawn.detectPatterns();
     const rules = await pawn.getFormattedGuidelines();
     return {
       content: [{ type: "text", text: rules }]
@@ -1339,7 +941,7 @@ server.tool(
 // Tool: Setup AI Environment
 server.tool(
   "setup_ai_environment",
-  "MANDATORY SETUP: Call this to install .cursorrules and SAMP_RULES.md into your SAMP server root. This forces AI agents (Cursor, Windsurf, etc.) to use the correct tools and maintain encoding.",
+  "OPTIONAL: Write AI_RULES.md and SAMP_RULES.md guidance files into the SAMP server root for external AI agents (Cursor, Windsurf, etc.). Only run when you explicitly want those files created — connecting alone never writes into your project.",
   {},
   async () => {
     try {

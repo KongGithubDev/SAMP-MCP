@@ -1,15 +1,23 @@
-# SAMP Project Rules for Cursor
+# SAMP Project Rules for Cursor / AI agents
 
 1. **ENCODING (CRITICAL)**:
-   - This project uses **Thai (Windows-874)** for .pwn and .inc.
-   - NEVER use `view_file` or `write_file`.
-   - ALWAYS use `read_pawn_script` and `write_pawn_script`.
-   
+   - Thai (Windows-874) source must stay Windows-874, byte-for-byte.
+   - Use encoding-aware file tools (e.g., mcp-file-tools) for ALL reads/writes/edits of .pwn/.inc/.cfg/log files — they auto-detect and preserve encoding + CRLF.
+   - Never re-save or transcode scripts with plain editors.
+
 2. **LANGUAGE**:
    - DO NOT translate Thai strings to English.
    - New code must follow the existing language (Thai if applicable).
 
-3. **TOOLS**:
-   - Prefer `transform_pawn_script` for cloning systems.
-   - Prefer `generate_boilerplate` for new features.
-   - Use `fix_script_encoding` if you see corrupted text.
+3. **SAMP-MCP SCOPE (when samp-mcp is connected)**:
+   - samp-mcp is for SAMP server operations: status/query, RCON, compile ('compile_pawn' / 'compile_and_load_pawn'), audits ('audit_script', 'audit_sql', 'audit_performance', 'find_shadowing'), 'check_includes', 'get_server_diagnostics', 'manage_server', plugin/include installs.
+   - samp-mcp does NOT read or write script files.
+   - Prefer 'generate_boilerplate' / 'design_feature' for new features.
+
+4. **ARCHITECTURE (module pattern, when detected)**:
+   - Build every new feature as ONE self-contained module under `gamemodes/includes/system/<name>.inc` (jobs: `system/job/j_<name>.inc`) — each module owns its state/hooks/commands/dialogs via YSI y_hooks (`hook OnGameModeInit` / `OnPlayerConnect` / `OnPlayerDisconnect` / `OnPlayerKeyStateChange`).
+   - Register it in `gamemodes/main.pwn` with `#include "includes/system/<name>.inc"`.
+   - Timed actions use `StartProgress(...)` + `hook OnProgressFinish`; messages use `ErrorMsg`/`ServerMsg`/`SyntaxMsg`; per-player state lives in `PlayerInfo[playerid][pX]` or static arrays.
+   - No gameplay logic in `main.pwn`; no filterscripts for new features.
+   - Commands are Pawn.CMD (`CMD:` + `flags:name(CMD_xxx)`); dialogs are easyDialog (`Dialog_Show` + `Dialog:NAME` handlers).
+   - PERFORMANCE: iterate players with `foreach(new i : Player)`; YSI timers (`timer X[1000]`/`repeat`) stopped on disconnect; threaded `mysql_format`+`mysql_tquery` only; Streamer dynamic objects; keep `OnPlayerUpdate` light.
