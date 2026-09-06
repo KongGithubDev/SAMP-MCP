@@ -24,11 +24,13 @@ yarn global add samp-mcp
 
 Requires **Node.js ≥ 18** and a functional **SA-MP server** directory.
 
+File tools need the [mcp-file-tools](https://github.com/dimitar-grigorov/mcp-file-tools) binary — samp-mcp finds it at its default install location, or you can point to it explicitly with the `SAMP_MCP_FILE_TOOLS_COMMAND` environment variable.
+
 ---
 
 ## Module-aware design
 
-For projects that organize code as system modules (e.g. `gamemodes/includes/system/*.inc` — the CareerCity pattern), samp-mcp auto-detects the architecture and aligns its tooling with it:
+For projects that organize code as system modules (e.g. `gamemodes/includes/system/*.inc` — the system-module pattern), samp-mcp auto-detects the architecture and aligns its tooling with it:
 
 - `get_coding_standards` reports the module layout (count, categories, StartProgress, message macros, dialog & command conventions).
 - `generate_boilerplate` (`type=module|job|autofarm`) emits a complete, self-contained module skeleton matching the project's own conventions (y_hooks, `hook OnGameModeInit/...`, `StartProgress`, `ErrorMsg/ServerMsg/SyntaxMsg`, `CMD:` + `flags:`), instead of generic snippets.
@@ -59,9 +61,15 @@ Once initialized, tell the AI agent:
 *"Connect to my SAMP server at C:\path\to\server"* (samp-mcp: `set_server_root`)
 
 ### 3. File Handling
-samp-mcp deliberately does **not** read or write script files. Use an encoding-aware
-file server such as **mcp-file-tools** for all file work — it auto-detects and preserves
-Windows-874 (Thai) and CRLF, so `.pwn`/`.inc` text never gets garbled.
+samp-mcp exposes `file_*` tools (`file_read`, `file_write`, `file_edit`, `file_grep`, …)
+that delegate to the encoding-aware **mcp-file-tools** server — it auto-detects and
+preserves Windows-874 (Thai) and CRLF, so `.pwn`/`.inc` text never gets garbled.
+(You can also configure mcp-file-tools directly as a separate MCP server — samp-mcp
+works either way.)
+
+To update or install the mcp-file-tools binary itself, run `update_file_tools`:
+it downloads the latest GitHub release for your platform and replaces the installed
+binary, keeping a backup of the previous version (`<binary>.v<old>.bak`).
 
 ### 4. Initialize AI Agent
 Copy and paste this as your **first prompt** to the AI:
@@ -80,13 +88,33 @@ Copy and paste this as your **first prompt** to the AI:
 | `get_status` | View hostname, players, and map statistics |
 | `rcon_command` | Execute RCON commands via AI |
 
+### File Access (encoding-safe, via mcp-file-tools)
+
+| Command | Description |
+|---|---|
+| `file_read` | Read a file, auto-detecting encoding (windows-874 Thai → UTF-8) |
+| `file_read_many` | Read multiple files at once |
+| `file_write` | Write a file back in its original encoding (CRLF preserved) |
+| `file_edit` | In-place line edits with diff preview, encoding-safe |
+| `file_grep` | Regex search across file contents with encoding support |
+| `file_search` | Find files by glob pattern |
+| `file_tree` | Project tree, optionally showing each file's encoding |
+| `file_list` | List directory contents with pattern filter |
+| `file_detect_encoding` | Report a file's real encoding + confidence |
+| `file_convert_encoding` | Convert a file between encodings (with backup) |
+| `file_info` | Get file/directory metadata |
+| `file_line_endings` | Detect or convert CRLF/LF line endings |
+| `file_bom` | Detect, strip, or add a BOM |
+| `file_allowed_dirs` | Show directories the file backend may access |
+| `file_encodings` | List all supported encodings |
+
 ### Pawn Intelligence
 
 | Command | Description |
 |---|---|
 | `compile_pawn` | Compile .pwn scripts and get structured errors |
 | `compile_and_load_pawn` | Compile then hot-load a script via RCON (`gmx`) |
-| `generate_boilerplate` | Generate Commands, Dialogs, or Job templates |
+| `generate_boilerplate` | Generate Commands, Dialogs, Job, or Admin-Command templates — admin modules emit the cmd/admin.inc style (`flags:`, `alias:`, `SendAdminMessage`, instant action) |
 | `inject_code` | Compile and test snippets without server restart |
 
 ### Plugin & Include Management
@@ -126,6 +154,7 @@ Copy and paste this as your **first prompt** to the AI:
 |---|---|
 | `check_for_updates` | Check if a new version of SAMP-MCP is available on NPM |
 | `update_mcp_server` | Perform a self-update of the server via NPM |
+| `update_file_tools` | Update/install the mcp-file-tools binary from GitHub (with backup) |
 
 ---
 
@@ -133,7 +162,7 @@ Copy and paste this as your **first prompt** to the AI:
 
 - **SAMP Server Operations** — query (status/players/rules/dashboard), RCON, player actions, process management
 - **Pawn Intelligence** — pawncc compile with structured errors, audits (SQL / performance / shadowing), include checks, log diagnostics
-- **Works With Encoding-Aware File Tools** — file reads/writes/edits are delegated to `mcp-file-tools`, which auto-detects Windows-874 (Thai) and preserves CRLF
+- **Encoding-Safe File Access** — built-in `file_read`/`file_write`/`file_edit`/`file_grep`/… tools delegate to `mcp-file-tools`, which auto-detects Windows-874 (Thai) and preserves CRLF
 - **Plugin Auto-Install** — GitHub release discovery with ZIP auto-extraction
 - **Web Search** — DuckDuckGo integration for SAMP-related queries
 - **Caching** — Project info cached for 5 minutes to reduce token usage

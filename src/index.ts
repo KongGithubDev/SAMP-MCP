@@ -6,6 +6,7 @@ import * as dotenv from 'dotenv';
 import { readFile } from 'fs/promises';
 import { SampClient } from './client.js';
 import { PawnManager } from './scripts.js';
+import { FileToolsBridge } from './filetools.js';
 
 // dotenv quiet mode keeps JSON-RPC on stdout clean
 process.env.DOTENV_CONFIG_QUIET = 'true';
@@ -20,6 +21,7 @@ const server = new McpServer({
 
 let client: SampClient | null = null;
 const pawn = new PawnManager();
+const fileTools = new FileToolsBridge();
 
 // Resources for persistent context
 server.resource(
@@ -90,13 +92,14 @@ server.tool(
   async ({ path, host }) => {
     try {
       const info = await updateConnection(path, host);
+      fileTools.setRoot(path);
       const p = await pawn.detectPatterns();
       const rules = await pawn.getFormattedGuidelines();
       
       return {
         content: [{ 
           type: "text", 
-          text: `Successfully connected to ${path}. Host: ${client?.host}, Port: ${info.port}.${p.hasSystemModules ? `\nArchitecture: module-based system (${p.systemModuleCount} modules under gamemodes/includes/system). Design new features as ONE self-contained .inc module there and register it in main.pwn — never as filterscripts.` : ''}\n\nSYSTEM RULES FOR THIS PROJECT (MANDATORY):\n${rules}\n\nAI AGENT: Follow these rules. samp-mcp is for SAMP server operations (query/RCON/compile/audit); all file read/write/edit must go through encoding-aware file tools (e.g., mcp-file-tools) so Windows-874 Thai and CRLF line endings are preserved.` 
+          text: `Successfully connected to ${path}. Host: ${client?.host}, Port: ${info.port}.${p.hasSystemModules ? `\nArchitecture: module-based system (${p.systemModuleCount} modules under gamemodes/includes/system). Design new features as ONE self-contained .inc module there and register it in main.pwn — never as filterscripts.` : ''}\n\nSYSTEM RULES FOR THIS PROJECT (MANDATORY):\n${rules}\n\nAI AGENT: Follow these rules. samp-mcp handles SAMP server operations (query/RCON/compile/audit) AND file access via its file_* tools (file_read/file_write/file_edit/file_grep/...), which delegate to encoding-aware mcp-file-tools so Windows-874 Thai and CRLF line endings are preserved.` 
         }]
       };
     } catch (error: any) {
@@ -114,6 +117,208 @@ const ensureRoot = () => {
         throw new Error("No SAMP server root set. Use 'set_server_root' first.");
     }
 };
+
+// =====================================================================
+// File Tools — delegated to the encoding-aware mcp-file-tools server.
+// Preserves Windows-874 (Thai) and CRLF when reading/writing .pwn/.inc.
+// =====================================================================
+
+async function fileToolResult(name: string, args: Record<string, unknown>) {
+  try {
+    const text = await fileTools.call(name, args);
+    return { content: [{ type: "text" as const, text }] };
+  } catch (error: any) {
+    return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+  }
+}
+
+server.tool(
+  "file_read",
+  "Read a file with encoding auto-detection (delegated to mcp-file-tools). Thai windows-874 and CRLF are preserved.",
+  {
+    path: z.string().describe("Path to the file to read"),
+    encoding: z.string().optional().describe("Encoding name (auto-detected if omitted)"),
+    offset: z.number().optional().describe("Start reading from this line number (1-indexed)"),
+    limit: z.number().optional().describe("Maximum number of lines to read"),
+    maxCharacters: z.number().optional().describe("Truncate content at this character count"),
+    lineNumbers: z.boolean().optional().describe("Prefix every line with N<tab>"),
+  },
+  async (params) => fileToolResult("read_text_file", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_read_many",
+  "Read multiple files at once with encoding support (delegated to mcp-file-tools).",
+  {
+    paths: z.array(z.string()).describe("Array of file paths to read"),
+    encoding: z.string().optional().describe("Encoding for all files (auto-detected per file if omitted)"),
+  },
+  async (params) => fileToolResult("read_multiple_files", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_write",
+  "Write a file back in its original encoding (delegated to mcp-file-tools). CRLF and BOM are preserved for existing files.",
+  {
+    path: z.string().describe("Path to the file to write"),
+    content: z.string().describe("Content to write"),
+    encoding: z.string().optional().describe("Target encoding (defaults to the existing file's detected encoding)"),
+    bom: z.string().optional().describe("BOM mode: auto (default), always, never, preserve"),
+    lineEndings: z.string().optional().describe("Line endings: preserve (default), crlf, lf, asis"),
+  },
+  async (params) => fileToolResult("write_file", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_edit",
+  "In-place line edits to one file with diff preview, encoding-safe (delegated to mcp-file-tools). Pass exactly one of edits or patch.",
+  {
+    path: z.string().describe("Path to the file to edit"),
+    edits: z.array(z.object({
+      oldText: z.string(),
+      newText: z.string(),
+      similarity: z.number().optional(),
+      replaceAll: z.boolean().optional(),
+    })).optional().describe("Edit operations (oldText/newText pairs)"),
+    patch: z.string().optional().describe("Unified diff string with ---, +++ and @@ hunks"),
+    dryRun: z.boolean().optional().describe("Preview the diff without writing (default false)"),
+    encoding: z.string().optional().describe("File encoding (auto-detected if omitted)"),
+    forceWritable: z.boolean().optional().describe("Clear read-only flag before editing"),
+  },
+  async (params) => fileToolResult("edit_file", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_grep",
+  "Regex search across file contents with encoding support (delegated to mcp-file-tools). Searches directories recursively.",
+  {
+    pattern: z.string().optional().describe("Regular expression to search for (or use patterns)"),
+    patterns: z.array(z.string()).optional().describe("Array of regexes; a line matching any is a hit"),
+    paths: z.array(z.string()).describe("Array of file or directory paths to search"),
+    outputMode: z.string().optional().describe("content (default), files_with_matches, or count"),
+    caseSensitive: z.boolean().optional().describe("Case-sensitive matching (default true)"),
+    matchesOnly: z.boolean().optional().describe("Return the matched substring instead of the whole line"),
+    contextBefore: z.number().optional().describe("Lines to show before each match"),
+    contextAfter: z.number().optional().describe("Lines to show after each match"),
+    maxMatches: z.number().optional().describe("Maximum results per page (default 1000)"),
+    offset: z.number().optional().describe("Skip the first N results to page"),
+    include: z.string().optional().describe("Glob to include files (e.g. *.pwn)"),
+    exclude: z.string().optional().describe("Glob to exclude files"),
+    includes: z.array(z.string()).optional().describe("Globs; a file matching any is included"),
+    excludes: z.array(z.string()).optional().describe("Globs; a file matching any is excluded"),
+    encoding: z.string().optional().describe("File encoding (auto-detected if omitted)"),
+  },
+  async (params) => fileToolResult("grep_text_files", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_search",
+  "Recursively find files/directories matching a glob pattern (delegated to mcp-file-tools).",
+  {
+    path: z.string().describe("Root directory to search from"),
+    pattern: z.string().describe("Glob pattern (e.g. **/*.pwn)"),
+    excludePatterns: z.array(z.string()).optional().describe("Patterns to exclude"),
+    maxResults: z.number().optional().describe("Maximum results (default 10000)"),
+    sortBy: z.string().optional().describe("name (default), mtime, or size"),
+    reverse: z.boolean().optional().describe("Flip the order"),
+  },
+  async (params) => fileToolResult("search_files", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_tree",
+  "Compact indented tree of a directory, optionally with per-file encoding (delegated to mcp-file-tools).",
+  {
+    path: z.string().describe("Root directory"),
+    maxDepth: z.number().optional().describe("Maximum recursion depth (0 = unlimited)"),
+    maxFiles: z.number().optional().describe("Maximum entries (default 1000)"),
+    dirsOnly: z.boolean().optional().describe("Only show directories"),
+    exclude: z.array(z.string()).optional().describe("Patterns to exclude"),
+    showEncoding: z.boolean().optional().describe("Show each file's detected encoding"),
+  },
+  async (params) => fileToolResult("tree", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_list",
+  "List directory contents with optional glob filter (delegated to mcp-file-tools).",
+  {
+    path: z.string().describe("Path to the directory"),
+    pattern: z.string().optional().describe("Glob pattern (default *)"),
+    sortBy: z.string().optional().describe("name (default), mtime, or size"),
+    reverse: z.boolean().optional().describe("Flip the order"),
+  },
+  async (params) => fileToolResult("list_directory", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_detect_encoding",
+  "Detect a file's real encoding with confidence score (delegated to mcp-file-tools).",
+  {
+    path: z.string().describe("Path to the file"),
+    mode: z.string().optional().describe("sample (default), chunked, or full"),
+  },
+  async (params) => fileToolResult("detect_encoding", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_convert_encoding",
+  "Convert a file between encodings (delegated to mcp-file-tools). Backs up by default is off — pass backup=true.",
+  {
+    path: z.string().optional().describe("Single file to convert"),
+    paths: z.array(z.string()).optional().describe("Batch of files to convert"),
+    from: z.string().optional().describe("Source encoding (auto-detected per file if omitted)"),
+    to: z.string().describe("Target encoding"),
+    backup: z.boolean().optional().describe("Create a .bak backup before converting"),
+    dryRun: z.boolean().optional().describe("Report what would change, write nothing"),
+    allowLowConfidence: z.boolean().optional().describe("Convert even when detection confidence is low"),
+  },
+  async (params) => fileToolResult("convert_encoding", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_info",
+  "Get file/directory metadata (size, timestamps, permissions) via mcp-file-tools.",
+  { path: z.string().describe("Path to a file or directory") },
+  async (params) => fileToolResult("get_file_info", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_line_endings",
+  "Detect or convert line endings (CRLF/LF/mixed) via mcp-file-tools.",
+  {
+    path: z.string().describe("Path to the file"),
+    action: z.string().describe("detect or convert"),
+    style: z.string().optional().describe("lf or crlf (required for convert)"),
+    encoding: z.string().optional().describe("Auto-detected by default"),
+  },
+  async (params) => fileToolResult("manage_line_endings", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_bom",
+  "Detect, strip, or add a Unicode BOM via mcp-file-tools.",
+  {
+    path: z.string().describe("Path to the file"),
+    action: z.string().describe("detect, strip, or add"),
+    encoding: z.string().optional().describe("BOM encoding (required for add)"),
+  },
+  async (params) => fileToolResult("manage_bom", params as Record<string, unknown>)
+);
+
+server.tool(
+  "file_allowed_dirs",
+  "Show directories the file backend (mcp-file-tools) may access.",
+  {},
+  async () => fileToolResult("list_allowed_directories", {})
+);
+
+server.tool(
+  "file_encodings",
+  "List all encodings supported by the file backend (mcp-file-tools).",
+  {},
+  async () => fileToolResult("list_encodings", {})
+);
 
 // Tool: RCON Command
 server.tool(
@@ -288,21 +493,22 @@ server.tool(
 // Tool: Generate Boilerplate
 server.tool(
   "generate_boilerplate",
-  "Generate SAMP code snippets / system-module skeletons that match the connected project architecture (CareerCity-style includes/system modules when detected). Use type 'module' for a full feature module, 'job'/'autofarm' for those module kinds, or 'command'/'dialog' for small blocks. DO NOT TRANSLATE generated Thai strings.",
+  "Generate SAMP code snippets / system-module skeletons that match the connected project architecture (system-module includes/system architecture when detected). Use type 'module' for a full feature module, 'job'/'autofarm' for those module kinds, or 'command'/'dialog' for small blocks. DO NOT TRANSLATE generated Thai strings.",
   { 
     type: z.enum(["command", "dialog", "module", "job", "autofarm"]).describe("Type of snippet to generate (module/job/autofarm produce full system-module skeletons)"),
-    name: z.string().describe("Name of the command/dialog/job/item")
+    name: z.string().describe("Name of the command/dialog/job/item"),
+    adminCommand: z.boolean().optional().describe("Emit the admin-command style (flags:CMD_LEAD_ADMIN, alias:, SendAdminMessage, instant action — cmd/admin.inc /veh family) instead of the interactive progress-bar flow. Auto-detected from the name (e.g. veh, kick, ban) when omitted; pass false to force the interactive skeleton.")
   },
-  async ({ type, name }) => {
+  async ({ type, name, adminCommand }) => {
     ensureRoot();
     const p = await pawn.detectPatterns();
     const moduleMode = !!p.hasSystemModules;
     let snippet = "";
 
     if (moduleMode && (type === "module" || type === "job" || type === "autofarm")) {
-      snippet = await pawn.moduleSkeleton(name, type);
+      snippet = await pawn.moduleSkeleton(name, type, adminCommand);
     } else if (type === "module") {
-      snippet = `// ${name}\n// Classic project (no gamemodes/includes/system): full-module boilerplate only applies to\n// CareerCity-style module projects. Use type command/dialog/job/autofarm instead.`;
+      snippet = `// ${name}\n// Classic project (no gamemodes/includes/system): full-module boilerplate only applies to\n// system-module projects. Use type command/dialog/job/autofarm instead.`;
     } else if (type === "command") {
       if (!moduleMode && p.hasPawnCMD) {
         snippet = `PCMD:${name}(playerid, params[])\n{\n    // Pawn.CMD style\n    return 1;\n}`;
@@ -352,7 +558,7 @@ server.tool(
 - **Architecture**: ${p.hasSystemModules ? `System Modules (${p.systemModuleCount} modules under gamemodes/includes/system)` : 'Monolithic / Classic'}
 
 ## Standards:
-1. **Encoding**: Files use Thai (windows-874) / auto-detected encodings. Use encoding-aware file tools (e.g., mcp-file-tools) for ALL .pwn and .inc file reads/writes/edits.
+1. **Encoding**: Files use Thai (windows-874) / auto-detected encodings. Use samp-mcp's file_* tools (file_read/file_write/file_edit/file_grep — delegated to encoding-aware mcp-file-tools) for ALL .pwn and .inc file reads/writes/edits.
 2. **Boilerplate**: Use \`generate_boilerplate\` to get the correct structure for this project.
 `;
 
@@ -845,6 +1051,26 @@ server.tool(
   }
 );
 
+// Tool: Update mcp-file-tools binary
+server.tool(
+  "update_file_tools",
+  "Download the latest mcp-file-tools release binary from GitHub and replace the installed one. The previous version is backed up next to it as <binary>.v<old>.bak; also works as a fresh install when the binary is missing. Reports when already up to date.",
+  {},
+  async () => {
+    try {
+      const msg = await fileTools.updateFileTools();
+      return {
+        content: [{ type: "text", text: msg }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
 // Tool: Design Feature (Planning)
 server.tool(
   "design_feature",
@@ -916,7 +1142,7 @@ server.prompt(
           
 GUIDELINES:
 1. samp-mcp handles SAMP server operations only (status, RCON, compile, audits).
-2. For ALL file reads/writes/edits on .pwn/.inc/.cfg/logs, use encoding-aware file tools (e.g., mcp-file-tools) — never plain editors that would corrupt Windows-874 Thai.
+2. For ALL file reads/writes/edits on .pwn/.inc/.cfg/logs, use samp-mcp's file_* tools (file_read/file_write/file_edit/file_grep — delegated to encoding-aware mcp-file-tools) — never plain editors that would corrupt Windows-874 Thai.
 3. Use the 'aaa_mandatory_read_first_guidelines' tool to see the full project rules.
 4. Keep the original language — do NOT translate existing strings.${p.hasSystemModules ? `\n5. When building NEW systems/features, follow the project's module pattern: ONE module under gamemodes/includes/system (use generate_boilerplate type=module/job/autofarm and design_feature, which now emit module-aware plans), register it in gamemodes/main.pwn, and never put gameplay logic in main.pwn.` : ''}`
         }

@@ -17,11 +17,11 @@ For Windsurf, Cursor, Antigravity, and all AI agents:
 If Thai ever shows garbled, stop and verify the file's encoding with an encoding-aware tool before writing.
 
 5. **ARCHITECTURE (module pattern, when detected)**:
-   - Projects like CareerCity build every feature as ONE self-contained module: `gamemodes/includes/system/<name>.inc` (jobs go to `system/job/j_<name>.inc`).
+   - Module-based projects build every feature as ONE self-contained module: `gamemodes/includes/system/<name>.inc` (jobs go to `system/job/j_<name>.inc`).
    - The module owns its state/hooks/commands/dialogs: `#include <YSI_Coding\y_hooks>`, then `hook OnGameModeInit` / `OnPlayerConnect` / `OnPlayerDisconnect` / `OnPlayerKeyStateChange`.
    - Register new modules in `gamemodes/main.pwn`: `#include "includes/system/<name>.inc"`.
    - Timed actions: `StartProgress(...)` + reward in `hook OnProgressFinish` guarded by a module state flag.
    - Messages: `ErrorMsg` / `ServerMsg` / `SyntaxMsg`. Per-player state: `PlayerInfo[playerid][pX]` or static `[MAX_PLAYERS]` arrays.
    - Never add gameplay logic to `main.pwn` and never create filterscripts for new features.
    - Commands: Pawn.CMD (`CMD:name` + `flags:name(CMD_xxx)` for permissions). Dialogs: easyDialog (`Dialog_Show` + `Dialog:NAME` handlers).
-   - PERFORMANCE (as CareerCity actually does): iterate players with `foreach(new i : Player)` — never `for (i < MAX_PLAYERS)`; use YSI timers (`timer X[1000]` / `repeat`) and stop them on disconnect; all MySQL via `mysql_format` + `mysql_tquery` (cache_* in the callback), never blocking queries; world objects/3D labels are Streamer dynamic; keep `OnPlayerUpdate` and fast per-player callbacks light.
+   - PERFORMANCE: iterate players with `foreach(new i : Player)` — never `for (i < MAX_PLAYERS)`; use YSI timers (`timer X[1000]` / `repeat`) and stop them on disconnect; all MySQL via `mysql_format` + `mysql_tquery` (cache_* in the callback), never blocking queries; world objects/3D labels are Streamer dynamic; keep `OnPlayerUpdate` and fast per-player callbacks light.

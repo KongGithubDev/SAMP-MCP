@@ -7,6 +7,11 @@ import jschardet from 'jschardet';
 
 const execPromise = promisify(exec);
 
+// Keywords hinting a module is an admin command → generate_boilerplate emits the
+// cmd/admin.inc style (flags:, alias:, SendAdminMessage, instant action) instead
+// of the interactive progress-bar flow.
+const ADMIN_COMMAND_HINTS = /(?:^|[-_.])(admin|veh|vehicle|kick|ban|mute|spec|teleport|tp|goto|destroy|respawn|delete|clear|spawn|give|heal|armour|armor|weapon|slap|freeze|unfreeze|warn|jail|unjail|restart|announce|weather)/i;
+
 export class PawnManager {
     public pawnccPath: string = '';
     public serverExePath: string = '';
@@ -398,7 +403,7 @@ export class PawnManager {
             }
         } catch { }
 
-        // Detect module-based architecture (CareerCity-style gamemodes/includes/system/*.inc)
+        // Detect module-based architecture (gamemodes/includes/system/*.inc)
         patterns.hasSystemModules = false;
         patterns.systemModuleCount = 0;
         patterns.systemCategories = [];
@@ -1431,6 +1436,21 @@ export class PawnManager {
         }
     }
 
+    /**
+     * English-only slug for plan filenames and module identifiers. Thai
+     * characters are stripped because the project names modules in English
+     * (respawncars.inc, j_cow.inc, ...) and Thai chars would break pawncc
+     * include paths / Pawn identifiers. Runs of junk collapse to one underscore.
+     */
+    private englishSlug(input: string, keepHyphen = false): string {
+        const allowed = keepHyphen ? /[^a-zA-Z0-9_-]+/g : /[^a-zA-Z0-9]+/g;
+        return input
+            .replace(allowed, '_')
+            .replace(/_+/g, '_')
+            .replace(/^_+|_+$/g, '')
+            .toLowerCase();
+    }
+
     async designFeature(title: string, description: string, requirements?: string[]): Promise<string> {
         if (!this.serverRoot) throw new Error("No root set. Run set_server_root first.");
 
@@ -1438,7 +1458,7 @@ export class PawnManager {
         await fs.mkdir(planDir, { recursive: true });
 
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const safeTitle = title.replace(/[^a-zA-Z0-9\u0E00-\u0E7F_-]/g, '_').substring(0, 50);
+        const safeTitle = (this.englishSlug(title, true) || 'feature').substring(0, 50);
         const filename = `${timestamp}_${safeTitle}.md`;
         const filepath = path.join(planDir, filename);
 
@@ -1448,7 +1468,7 @@ export class PawnManager {
 
         const pat = await this.detectPatterns().catch(() => null);
         const moduleMode = !!(pat && pat.hasSystemModules);
-        const slug = title.replace(/[^a-zA-Z0-9\u0E00-\u0E7F]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'feature';
+        const slug = this.englishSlug(title) || 'feature';
         const archIntro = moduleMode
             ? `\n\n**Architecture**: this project builds features as self-contained system modules. Implement this feature as ONE module and register it in gamemodes/main.pwn — never add gameplay logic to main.pwn or create filterscripts for it.`
             : '';
@@ -1517,24 +1537,50 @@ ${archSteps}
         return filepath;
     }
 
-    async moduleSkeleton(name: string, kind: 'module' | 'job' | 'autofarm' = 'module'): Promise<string> {
+    async moduleSkeleton(name: string, kind: 'module' | 'job' | 'autofarm' = 'module', adminCommand?: boolean): Promise<string> {
         const p = await this.detectPatterns().catch(() => null);
-        const slugRaw = name.replace(/[^a-zA-Z0-9\u0E00-\u0E7F]+/g, '_').replace(/^_+|_+$/g, '');
+        const slugRaw = this.englishSlug(name);
         const id = (slugRaw || 'feature').toLowerCase();
         const Cap = id.charAt(0).toUpperCase() + id.slice(1);
         const isJob = kind === 'job';
+        // Admin style when explicitly requested, or auto-detected from the name;
+        // an explicit adminCommand:false disables the auto-detection.
+        const isAdmin = kind === 'module' && (adminCommand === true || (adminCommand !== false && ADMIN_COMMAND_HINTS.test(name)));
         const fileName = (isJob ? 'j_' : '') + id;
         const hasProg = !!(p && p.hasStartProgress);
         const helpers = (p && p.messageHelpers) || [];
         const mErr = helpers.indexOf('ErrorMsg') !== -1 ? 'ErrorMsg(playerid, "...")' : 'SendClientMessage(playerid, 0xFA0000FF, "...")';
         const mOk = helpers.indexOf('ServerMsg') !== -1 ? 'ServerMsg(playerid, "...")' : 'SendClientMessage(playerid, 0x0060FFFF, "...")';
+        const mSyntax = helpers.indexOf('SyntaxMsg') !== -1 ? 'SyntaxMsg(playerid, "...")' : 'SendClientMessage(playerid, 0xFFFF00FF, "...")';
 
         let s = '';
-        s += `// ${Cap} - ${kind === 'autofarm' ? 'collect / farm module' : 'self-contained system module'}\n`;
+        s += `// ${Cap} - ${isAdmin ? 'admin command module (cmd/admin.inc style)' : kind === 'autofarm' ? 'collect / farm module' : 'self-contained system module'}\n`;
         s += `// Put at: gamemodes/includes/${isJob ? 'system/job/' : 'system/'}${fileName}.inc\n`;
         s += `// Register in gamemodes/main.pwn:\n`;
         s += `// #include "includes/system/${isJob ? 'job/' : ''}${fileName}.inc"\n`;
         s += `#include    <YSI_Coding\\y_hooks>\n\n`;
+
+        if (isAdmin) {
+            s += `// Instant admin action — no progress bar (cmd/admin.inc /veh family idiom):\n`;
+            s += `alias:${id}("...")  // Thai alias, e.g. "รีรถเสก"\n`;
+            s += `flags:${id}(CMD_LEAD_ADMIN)  // permission: CMD_DEV / CMD_LEAD_ADMIN / CMD_ADM_1 ...\n`;
+            s += `CMD:${id}(playerid, params[]) {\n`;
+            s += `    new\n`;
+            s += `        targetid\n`;
+            s += `    ;\n`;
+            s += `    if (sscanf(params, "u", targetid))\n`;
+            s += `        return ${mSyntax};\n`;
+            s += `    if (!IsPlayerConnected(targetid))\n`;
+            s += `        return ${mErr};\n`;
+            s += `    // <act on the target — reuse shared state like adminVehicle[] in the /veh family>\n`;
+            s += `    SendAdminMessage(COLOR_YELLOW, CMD_LEAD_ADMIN, "[แจ้งเตือนผู้ดูแลระบบ]: %s ใช้คำสั่ง /${id} กับ %s", GetPlayerNameEx(playerid), GetPlayerNameEx(targetid));\n`;
+            s += `    return 1;\n`;
+            s += `}\n\n`;
+            s += `// hook OnGameModeInit() { ... }  // start repeat timers / set globals (see respawncars.inc)\n`;
+            s += `// hook OnGameModeExit()  { ... }  // stop repeat timers\n`;
+            return s;
+        }
+
         let state = `static\n    ${Cap}_Busy[MAX_PLAYERS]`;
         if (!hasProg) state += `\n,   Timer: ${Cap}_Timer[MAX_PLAYERS]`;
         s += state + '\n;\n\n';
@@ -1634,8 +1680,8 @@ ${unchecked.length > 0 || missingFiles.length > 0
 # SAMP AI AGENT RULES (samp-mcp + file tools)
 
 1. **ENCODING**: This project uses **${isThai ? 'Thai (Windows-874)' : 'International'}** encoding. Keep it byte-for-byte.
-2. **FILE TOOLS**: Use encoding-aware file tools (e.g., mcp-file-tools) for ALL file reads/writes/edits — they auto-detect and preserve Windows-874 Thai and CRLF. NEVER re-save scripts with plain editors.
-3. **SAMP-MCP SCOPE**: samp-mcp handles SAMP server operations only (status/RCON/compile/audits), not file editing.
+2. **FILE TOOLS**: Use samp-mcp's file_* tools (file_read/file_write/file_edit/file_grep/file_search) for ALL file reads/writes/edits — they delegate to encoding-aware mcp-file-tools which preserves Windows-874 Thai and CRLF. NEVER re-save scripts with plain editors.
+3. **SAMP-MCP SCOPE**: samp-mcp handles SAMP server operations (status/RCON/compile/audits) AND file access via its file_* tools (delegated to mcp-file-tools).
 4. **NO TRANSLATION**: Maintain the project's primary language.
 5. **PLANNING RULE (CRITICAL)**: 
    - Before implementing ANY new feature or system, you **MUST** use 'design_feature' to create a structured plan.
@@ -1658,8 +1704,8 @@ When Thai shows garbled, stop and re-check the file's real encoding with an enco
 For Windsurf, Cursor, Antigravity, and all AI agents:
 
 1. **ENCODING**: This project uses **${isThai ? 'Thai (Windows-874)' : 'Universal Auto-Detection'}**.
-   - Use encoding-aware file tools (e.g., mcp-file-tools) for ALL file reads/writes/edits so Thai (Windows-874) and CRLF line endings are preserved.
-   - samp-mcp is for SAMP server operations only (status/RCON/compile/audits) — it does not edit script files.
+   - Use samp-mcp's file_* tools (file_read/file_write/file_edit/file_grep — delegated to encoding-aware mcp-file-tools) for ALL file reads/writes/edits so Thai (Windows-874) and CRLF line endings are preserved.
+   - samp-mcp also exposes file access through its file_* tools (delegated to mcp-file-tools).
 
 2. **LANGUAGE PRESERVATION**:
    - **DO NOT** translate strings. Maintain the original project language.
@@ -1704,8 +1750,8 @@ If Thai ever shows garbled, stop and verify the file's encoding with an encoding
 
 1. **ENCODING**:
    - This project uses **${isThai ? 'Thai (Windows-874)' : 'International (auto-detected)'}** encoding.
-   - All file reads/writes/edits go through encoding-aware file tools (e.g., mcp-file-tools) that detect and preserve the real encoding (Windows-874 Thai, CRLF). Never re-save or transcode scripts with plain editors.
-   - samp-mcp is for SAMP server operations only (status/query, RCON, compile, audits) — it does not edit script files.
+   - All file reads/writes/edits go through samp-mcp's file_* tools (file_read/file_write/file_edit/file_grep), which delegate to encoding-aware mcp-file-tools that detect and preserve the real encoding (Windows-874 Thai, CRLF). Never re-save or transcode scripts with plain editors.
+   - samp-mcp exposes both SAMP server operations (status/query, RCON, compile, audits) and file access via its file_* tools.
 
 2. **LANGUAGE PRESERVATION**:
    - **DO NOT** translate existing strings. 
