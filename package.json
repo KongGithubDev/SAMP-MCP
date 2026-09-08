@@ -1,5 +1,5 @@
 {
-  "name": "samp-mcp",
+  "name": "@konggithubdev/samp-mcp",
   "version": "1.0.12",
   "description": "An MCP server for Managing SAMP (San Andreas Multiplayer) servers with Thai (Windows-874) support.",
   "main": "dist/index.js",
@@ -34,8 +34,9 @@
   ],
   "author": "Watcharapong Namsaeng",
   "license": "MIT",
+  "repository": "https://github.com/KongGithubDev/SAMP-MCP.git",
   "publishConfig": {
-    "access": "public"
+    "registry": "https://npm.pkg.github.com"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

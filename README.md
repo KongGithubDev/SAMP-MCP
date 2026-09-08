@@ -4,9 +4,8 @@
 
 **A comprehensive MCP server for SA-MP server development and management**
 
-[![npm version](https://img.shields.io/npm/v/samp-mcp.svg)](https://www.npmjs.com/package/samp-mcp)
-[![npm downloads](https://img.shields.io/npm/dm/samp-mcp.svg)](https://www.npmjs.com/package/samp-mcp)
-[![license](https://img.shields.io/npm/l/samp-mcp.svg)](LICENSE)
+[![GitHub Packages](https://img.shields.io/badge/package-GitHub%20Packages-24292e.svg?logo=github)](https://github.com/KongGithubDev/SAMP-MCP/pkgs/npm/samp-mcp)
+[![license](https://img.shields.io/github/license/KongGithubDev/SAMP-MCP.svg)](LICENSE)
 
 Manage, script, and audit SA-MP servers with AI assistance.
 
@@ -17,9 +16,16 @@ Manage, script, and audit SA-MP servers with AI assistance.
 ## Installation
 
 ```sh
-npm install -g samp-mcp
+npm install -g @konggithubdev/samp-mcp
 # or
-yarn global add samp-mcp
+yarn global add @konggithubdev/samp-mcp
+```
+
+The package is published to **GitHub Packages**, so installs and updates require authentication — create a personal access token (classic) with `read:packages` scope and add it to `~/.npmrc`:
+
+```
+//npm.pkg.github.com/:_authToken=TOKEN
+@konggithubdev:registry=https://npm.pkg.github.com
 ```
 
 Requires **Node.js ≥ 18** and a functional **SA-MP server** directory.

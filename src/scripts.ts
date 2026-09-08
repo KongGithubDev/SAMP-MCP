@@ -1415,7 +1415,7 @@ export class PawnManager {
 
     async checkMcpUpdate(current: string = "1.0.8"): Promise<{ current: string, latest: string, needsUpdate: boolean }> {
         try {
-            const { stdout } = await execPromise('npm view samp-mcp version');
+            const { stdout } = await execPromise('npm view @konggithubdev/samp-mcp version --registry=https://npm.pkg.github.com');
             const latest = stdout.trim();
             return {
                 current,
@@ -1429,7 +1429,7 @@ export class PawnManager {
 
     async updateMcpServer(): Promise<string> {
         try {
-            await execPromise('npm install -g samp-mcp');
+            await execPromise('npm install -g @konggithubdev/samp-mcp');
             return "SAMP-MCP has been updated to the latest version. Please restart your MCP client.";
         } catch (error: any) {
             throw new Error(`Update failed: ${error.message}`);
