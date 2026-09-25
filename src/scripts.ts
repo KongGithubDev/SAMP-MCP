@@ -1769,7 +1769,14 @@ If Thai ever shows garbled, stop and verify the file's encoding with an encoding
    - Architecture: ${p.hasSystemModules ? `System Modules (${p.systemModuleCount} in gamemodes/includes/system)` : 'Monolithic / Classic'}
 ${archRule}
 
-${p.hasSystemModules ? '6' : '5'}. **CODE STYLE**:
+${p.hasSystemModules ? '6' : '5'}. **UI / TEXTDRAWS (textdraw editor)**:
+   - Build HUD/UI textdraws with the textdraw tools: textdraw_create / textdraw_update keep them in a project under .samp-mcp/textdraws/*.json, textdraw_list reports validation warnings.
+   - Always LOOK at the result before compiling: textdraw_preview renders the page (serve=true gives a live editor where textdraws can be dragged and saved back into the project).
+   - Import legacy UI with textdraw_import; emit Pawn with textdraw_export (mode=module produces a system-module .inc with hooks + show/hide stocks).
+   - Sprite textdraws: font 4 and text "txdname:texturename"; run txd_scan so .txd dictionaries are decoded and the preview shows the real sprites. Model previews: font 5 + previewModel (0.3.DL custom UI textures need AddSimpleModel — imported automatically when present).
+   - Font 5 shows the real mesh: model_scan finds the .dff/.txd (loose files, models/, VER2 .img archives), model_preview renders it with TextDrawSetPreviewRot semantics (rot/zoom/vehCol) and caches it for the preview page, where a model can be dragged to orbit and wheel-zoomed. model_export writes OBJ+MTL or glTF when the mesh itself needs editing.
+
+${p.hasSystemModules ? '7' : '6'}. **CODE STYLE**:
    - Group declarations: \`new a, b, c;\` NOT multiple \`new\` lines.
    - Compact calls: single line when fits ~80-100 chars.
    - Minimal comments: only complex logic, never obvious ones.

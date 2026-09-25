@@ -1,6 +1,6 @@
 {
   "name": "@konggithubdev/samp-mcp",
-  "version": "1.0.12",
+  "version": "1.2.0",
   "description": "An MCP server for Managing SAMP (San Andreas Multiplayer) servers with Thai (Windows-874) support.",
   "main": "dist/index.js",
   "type": "module",
@@ -20,7 +20,11 @@
     "lint": "eslint src",
     "deadcode": "node scripts/check-dead-methods.mjs",
     "prune": "ts-prune -e",
-    "check": "npm run lint && npm run deadcode && npm run prune && npm run build"
+    "check": "npm run lint && npm run deadcode && npm run prune && npm run build && npm run test:model && npm run test:textdraw",
+    "demo:textdraw": "node scripts/textdraw-demo.mjs",
+    "demo:model": "node scripts/model-demo.mjs",
+    "test:textdraw": "node scripts/textdraw-mcp-test.mjs",
+    "test:model": "node scripts/model-demo.mjs"
   },
   "keywords": [
     "samp",

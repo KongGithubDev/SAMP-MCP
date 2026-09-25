@@ -7,12 +7,14 @@ import { readFile } from 'fs/promises';
 import { SampClient } from './client.js';
 import { PawnManager } from './scripts.js';
 import { FileToolsBridge } from './filetools.js';
+import { TextdrawManager } from './textdraw.js';
+import { models } from './model.js';
 
 // dotenv quiet mode keeps JSON-RPC on stdout clean
 process.env.DOTENV_CONFIG_QUIET = 'true';
 dotenv.config({ quiet: true });
 
-const APP_VERSION = "1.0.11";
+const APP_VERSION = "1.2.0";
 
 const server = new McpServer({
   name: "samp-mcp-server",
@@ -22,6 +24,7 @@ const server = new McpServer({
 let client: SampClient | null = null;
 const pawn = new PawnManager();
 const fileTools = new FileToolsBridge();
+const textdraw = new TextdrawManager();
 
 // Resources for persistent context
 server.resource(
@@ -57,6 +60,7 @@ async function updateConnection(root: string, hostOverride?: string, portOverrid
     
     client?.close(); // close previous socket before replacing
     client = new SampClient(host, port, password);
+    textdraw.setRoot(root);
     console.error(`Connected to SAMP server at: ${root} (Host: ${host}, Port: ${port})`);
     return { root, port, password };
 }
@@ -1126,6 +1130,399 @@ server.tool(
   }
 );
 
+// =====================================================================
+// Textdraw Editor (SA-MP textdraw projects, txd/TXD sprites, web preview)
+// =====================================================================
+
+const tdProps = {
+  text: z.string().optional().describe('Textdraw text. Font 4 sprites use "txdname:texturename"; "_" renders as a space.'),
+  target: z.enum(["global", "player"]).optional().describe('Global TextDraw (default) or per-player PlayerTextDraw'),
+  x: z.number().optional().describe('X on the 640x448 textdraw grid'),
+  y: z.number().optional().describe('Y on the 640x448 textdraw grid'),
+  letterWidth: z.number().optional().describe('TextDrawLetterSize x (character width)'),
+  letterHeight: z.number().optional().describe('TextDrawLetterSize y (character height)'),
+  textSizeX: z.number().optional().describe('TextDrawTextSize x (box corner/width or clickable area)'),
+  textSizeY: z.number().optional().describe('TextDrawTextSize y (box corner/height)'),
+  font: z.number().optional().describe('0-3 = hud/arial/display fonts, 4 = txd sprite, 5 = 3D model preview'),
+  alignment: z.number().optional().describe('1 = left, 2 = center, 3 = right'),
+  color: z.string().optional().describe('Text colour, SA-MP ARGB (0xRRGGBBAA). CSS-style #RRGGBB(AA) is also accepted (RGBA order)'),
+  boxColor: z.string().optional().describe('Box colour (ARGB); alpha 0 makes the box invisible'),
+  background: z.string().optional().describe('TextDrawBackgroundColor (ARGB)'),
+  shadow: z.number().optional().describe('TextDrawSetShadow size'),
+  outline: z.number().optional().describe('TextDrawSetOutline size'),
+  proportional: z.boolean().optional().describe('TextDrawSetProportional'),
+  box: z.boolean().optional().describe('TextDrawUseBox'),
+  selectable: z.boolean().optional().describe('TextDrawSetSelectable (needs textSizeX/textSizeY for the clickable area)'),
+  previewModel: z.number().optional().describe('Model id for font 5 previews (TextDrawSetPreviewModel)'),
+  previewRot: z.array(z.number()).optional().describe('[rx, ry, rz] preview rotation'),
+  previewZoom: z.number().optional().describe('Preview zoom for TextDrawSetPreviewRot'),
+  previewVehCol: z.array(z.number()).optional().describe('[colour1, colour2] for vehicle model previews'),
+  image: z.string().optional().describe('Optional bitmap (png/jpg) inside the server root, shown on the preview page for UI mockups'),
+  group: z.string().optional().describe('Group/category name used for filtering and bulk export'),
+  note: z.string().optional().describe('Free-form note kept with the textdraw'),
+};
+
+server.tool(
+  "textdraw_list",
+  "List textdraws of a saved textdraw project (UI/HUD design store under .samp-mcp/textdraws). Without a project, lists the available projects. Returns the definitions, stats and validation warnings.",
+  {
+    project: z.string().optional().describe('Project name (default: default)'),
+    group: z.string().optional().describe('Only textdraws of this group'),
+    target: z.enum(["all", "global", "player"]).optional().describe('Filter by textdraw kind'),
+    search: z.string().optional().describe('Filter by name, text or group substring'),
+  },
+  async ({ project, group, target, search }) => {
+    try {
+      if (!project) {
+        const info = await textdraw.listProjects();
+        return { content: [{ type: "text" as const, text: JSON.stringify(info, null, 2) }] };
+      }
+      const result = await textdraw.listTextdraws(project, { group, target, search });
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "textdraw_create",
+  "Create a textdraw in a textdraw project (kept as JSON under the server root, so it can be reviewed, versioned and exported to Pawn). Supports the full SA-MP property set including txd sprites (font 4) and model previews (font 5).",
+  {
+    project: z.string().optional().describe('Project name (default: default)'),
+    name: z.string().describe('Pawn variable name, e.g. gLogo or PlayerHud'),
+    ...tdProps,
+  },
+  async ({ project, ...def }) => {
+    try {
+      ensureRoot();
+      const result = await textdraw.createTextdraw(project || 'default', def as Record<string, unknown>);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "textdraw_update",
+  "Update one textdraw of a project (by id or Pawn name). Only the fields you pass are changed — use it to nudge position, colours, letter size, font, sprite text, preview model, etc.",
+  {
+    project: z.string().optional().describe('Project name (default: default)'),
+    textdraw: z.string().describe('Textdraw id or Pawn variable name to update'),
+    name: z.string().optional().describe('Rename the Pawn variable name'),
+    id: z.string().optional().describe('Rename the internal id'),
+    visible: z.boolean().optional().describe('Show it on the preview page by default'),
+    ...tdProps,
+  },
+  async ({ project, textdraw: target, ...patch }) => {
+    try {
+      ensureRoot();
+      const result = await textdraw.updateTextdraw(project || 'default', target, patch as Record<string, unknown>);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "textdraw_delete",
+  "Delete one or more textdraws from a project (by id or Pawn variable name).",
+  {
+    project: z.string().optional().describe('Project name (default: default)'),
+    targets: z.array(z.string()).describe('Ids or Pawn variable names to delete'),
+  },
+  async ({ project, targets }) => {
+    try {
+      ensureRoot();
+      const result = await textdraw.deleteTextdraw(project || 'default', targets);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "textdraw_import",
+  "Import textdraws into a project from: existing TextDrawCreate / CreatePlayerTextDraw code (+ all TextDraw* setters and AddSimpleModel entries) in .pwn/.inc files, a samp-mcp project JSON, or a TextDrawEditor (Leonardo541) project JSON — so legacy UI, and designs made in that browser editor, can be edited, previewed and exported from here. Accepts a file or a directory.",
+  {
+    project: z.string().optional().describe('Project name (default: default)'),
+    path: z.string().describe('File or directory (relative to the server root or absolute) to import from'),
+    mode: z.enum(["merge", "replace"]).optional().describe('merge (default) updates same-named textdraws, replace clears the project first'),
+  },
+  async ({ project, path, mode }) => {
+    try {
+      ensureRoot();
+      const result = await textdraw.importFromScript(project || 'default', path, mode === 'replace' ? 'replace' : 'merge');
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "textdraw_export",
+  "Export textdraws as ready-to-use Pawn code: statements (create + setters), declarations, a full system-module .inc (y_hooks, OnGameModeInit/OnPlayerConnect, show/hide stocks), a markdown table, or raw JSON.",
+  {
+    project: z.string().optional().describe('Project name (default: default)'),
+    mode: z.enum(["statements", "declarations", "module", "markdown", "json"]).describe('Output format'),
+    target: z.enum(["all", "global", "player"]).optional().describe('Limit to global or per-player textdraws'),
+    group: z.string().optional().describe('Limit to one group'),
+    name: z.string().optional().describe('Limit to a single textdraw'),
+  },
+  async ({ project, mode, target, group, name }) => {
+    try {
+      ensureRoot();
+      const result = await textdraw.exportTextdraws(project || 'default', { mode, target, group, name });
+      return { content: [{ type: "text" as const, text: result.content }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "textdraw_preview",
+  "Render every textdraw of a project on a web page (HTML + embedded textures) so you can see the UI without starting SA-MP: 640x448 grid scaled to real resolutions, box/alignment/colour/outline rendering, decoded .txd sprites for font 4, model-preview placeholders for font 5. With serve=true it also starts a local editor server where you can drag textdraws and save the changes back.",
+  {
+    project: z.string().optional().describe('Project name (default: default)'),
+    serve: z.boolean().optional().describe('Start the local preview/editor server on 127.0.0.1 and return its URL'),
+    port: z.number().optional().describe('Port for the preview server (default 7788, next free port if busy)'),
+    exportPng: z.boolean().optional().describe('Write decoded .txd textures as PNG files next to the page (default true)'),
+    inlineAssets: z.boolean().optional().describe('Embed textures in the page as data URLs so it works standalone (default true)'),
+    maxTextureSize: z.number().optional().describe('Downscale textures above this size (default 256)'),
+  },
+  async ({ project, serve, port, exportPng, inlineAssets, maxTextureSize }) => {
+    try {
+      ensureRoot();
+      const projectName = project || 'default';
+      let url: string | null = null;
+      if (serve) {
+        const server = await textdraw.startPreviewServer(projectName, port);
+        url = server.url;
+      }
+      const result = await textdraw.buildPreview(projectName, {
+        exportPng: exportPng !== false,
+        inlineAssets: inlineAssets !== false,
+        maxTextureSize: maxTextureSize ?? 256,
+      });
+      const lines = [
+        `Preview page: ${result.htmlPath}`,
+        `Project data: ${result.dataPath}`,
+        url || result.url ? `Live editor server: ${url || result.url}` : 'Static page only — pass serve=true for the draggable live editor (save back to the project file).',
+        `Textdraws rendered: ${result.textdraws} · decoded textures: ${result.assets} · 3D model previews: ${result.models}`,
+        result.missingTextures.length ? `Sprites without a decoded texture (run txd_scan): ${result.missingTextures.join(', ')}`
+          : result.designOverrides.length ? `Sprites drawn from design-time images (not in a .txd yet, so the game shows nothing until you ship them): ${result.designOverrides.join(', ')}`
+          : 'All referenced sprites were resolved from .txd dictionaries.',
+        result.missingModels.length ? `Font 5 texts without a .dff (run model_scan + model_preview): ${result.missingModels.join(', ')}` : '',
+        result.warnings.length ? `Validation:\n${result.warnings.join('\n')}` : 'Validation: no issues.',
+      ];
+      return { content: [{ type: "text" as const, text: lines.join('\n') }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "textdraw_preview_server",
+  "Start/stop/status of the live textdraw preview server (127.0.0.1). While it runs, the page reloads itself when the project file changes and the browser can drag textdraws and save them straight back into the project.",
+  {
+    action: z.enum(["start", "stop", "status"]).describe('start, stop or status'),
+    project: z.string().optional().describe('Project to serve (default: default)'),
+    port: z.number().optional().describe('Preferred port (default 7788)'),
+  },
+  async ({ action, project, port }) => {
+    try {
+      if (action === 'status') {
+        return { content: [{ type: "text" as const, text: textdraw.previewServerStatus() }] };
+      }
+      if (action === 'stop') {
+        return { content: [{ type: "text" as const, text: await textdraw.stopPreviewServer() }] };
+      }
+      ensureRoot();
+      const started = await textdraw.startPreviewServer(project || 'default', port);
+      return {
+        content: [{ type: "text" as const, text: `Textdraw preview server running:\n  URL: ${started.url}\n  Page: ${started.htmlPath}\nOpen the URL in a browser: drag textdraws on the screen, then press save to write them back into the project file.` }]
+      };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "txd_scan",
+  "Scan the SA-MP server for .txd texture dictionaries, list their textures (sizes/formats) and decode them to PNG so font 4 sprite textdraws can be previewed. Writes an index under .samp-mcp/textdraws/txd-index.json and PNGs to .samp-mcp/textdraw-preview/assets.",
+  {
+    dir: z.string().optional().describe('Directory to scan (default: the server root)'),
+    depth: z.number().optional().describe('How many directory levels to descend (default 3)'),
+    exportPng: z.boolean().optional().describe('Write decoded textures as PNG (default true)'),
+    maxTextureSize: z.number().optional().describe('Downscale textures above this size (default 256)'),
+    limit: z.number().optional().describe('Maximum number of .txd files to read (default 64)'),
+  },
+  async ({ dir, depth, exportPng, maxTextureSize, limit }) => {
+    try {
+      ensureRoot();
+      const result = await textdraw.scanTxds({
+        dir,
+        depth: depth ?? 3,
+        exportPng: exportPng !== false,
+        maxTextureSize: maxTextureSize ?? 256,
+        limit: limit ?? 64,
+      });
+      const summary = [
+        `Scanned ${result.scannedFiles} .txd file(s); index written to ${result.indexFile}`,
+        ...result.dictionaries.map((d) => `  ${d.file} → ${d.textureCount} textures${d.error ? ` (${d.error})` : ''}`),
+      ];
+      return {
+        content: [
+          { type: "text" as const, text: summary.join('\n') },
+          { type: "text" as const, text: JSON.stringify({ ...result, textures: result.textures.slice(0, 200) }, null, 2) },
+        ]
+      };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+/** 0xRRGGBBAA / #RRGGBB(AA) → RGBA byte tuple for the model renderer. */
+function parseBackground(value: string): [number, number, number, number] | null {
+  const trimmed = value.trim();
+  const cssOrder = trimmed.startsWith('#');
+  const text = trimmed.replace(/^#/, '').replace(/^0x/i, '');
+  const hex = /^[0-9a-f]{6}$/i.test(text) ? text + 'FF'
+    : /^[0-9a-f]{8}$/i.test(text) ? (cssOrder ? text.slice(6, 8) + text.slice(0, 6) : text)
+    : null;
+  if (!hex) return null;
+  return [
+    parseInt(hex.slice(0, 2), 16),
+    parseInt(hex.slice(2, 4), 16),
+    parseInt(hex.slice(4, 6), 16),
+    parseInt(hex.slice(6, 8), 16),
+  ];
+}
+
+server.tool(
+  "model_scan",
+  "Find the 3D models this server can show in a font 5 textdraw preview: loose .dff files (and their .txd dictionaries), models inside VER2 .img archives (gta3.img / samp.img), and the AddSimpleModel model ids the textdraw projects reference. Parses each .dff (clumps, atomics, frames, vertices, triangles, materials, texture names) and writes an index under .samp-mcp/textdraws/model-index.json.",
+  {
+    dir: z.string().optional().describe('Directory to scan (default: the server root)'),
+    depth: z.number().optional().describe('How many directory levels to descend (default 3)'),
+    limit: z.number().optional().describe('Maximum number of .dff files to read (default 200)'),
+    img: z.string().optional().describe('Also index this .img archive (default: every .img found near the root, e.g. models/gta3.img)'),
+  },
+  async ({ dir, depth, limit, img }) => {
+    try {
+      ensureRoot();
+      const result = await models.scan({ dir, depth: depth ?? 3, limit: limit ?? 200, img });
+      const lines = [`Scanned ${result.scannedFiles} .dff file(s) · index: ${result.indexFile}`];
+      for (const dff of result.dffs.slice(0, 40)) {
+        lines.push(`  ${dff.file} — ${dff.stats.vertices} verts, ${dff.stats.triangles} tris, ${dff.stats.materials} materials, ${dff.stats.dummies} dummies${dff.modelIds.length ? ` · model ids ${dff.modelIds.join(',')}` : ''}${dff.textures.length ? ` · textures ${dff.texturesFound.length}/${dff.textures.length}` : ''}`);
+      }
+      for (const archive of result.archives) {
+        lines.push(`  archive ${archive.file} (VER${archive.version}) — ${archive.entries} entries, ${archive.listed.length} .dff listed${archive.error ? ` · ${archive.error}` : ''}`);
+      }
+      for (const warning of result.warnings) lines.push(`  ! ${warning}`);
+      return {
+        content: [
+          { type: "text" as const, text: lines.join('\n') },
+          { type: "text" as const, text: JSON.stringify(result, null, 2) },
+        ]
+      };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "model_preview",
+  "Render a GTA model (.dff, with its .txd textures) to a PNG the way a font 5 textdraw shows it, without starting the game: pass a model id (from AddSimpleModel / <id>.dff), a file path, or a bare name (also searched inside indexed .img archives). Renders with TextDrawSetPreviewRot semantics (rot, zoom, vehicle colours) and saves the result to .samp-mcp/textdraw-assets/models so textdraw_preview picks it up.",
+  {
+    model: z.union([z.number(), z.string()]).optional().describe('Model id (e.g. 411), a .dff path, or a model name (searched on disk and in .img archives)'),
+    file: z.string().optional().describe('Explicit .dff path (alternative to model)'),
+    rot: z.array(z.number()).optional().describe('[rx, ry, rz] like TextDrawSetPreviewRot (degrees; rx tilts, rz yaws)'),
+    zoom: z.number().optional().describe('Preview zoom (TextDrawSetPreviewRot zoom, default 1)'),
+    vehCol: z.array(z.number()).optional().describe('[primary, secondary] vehicle colours for models whose materials mark body parts'),
+    width: z.number().optional().describe('Output width in pixels (default 256, max 1024)'),
+    height: z.number().optional().describe('Output height in pixels (default: same as width)'),
+    background: z.string().optional().describe('Background colour (0xRRGGBBAA / #RRGGBB); omit for transparency'),
+    yaw: z.number().optional().describe('Camera orbit around the model in degrees (default 40, 0 = straight at the front)'),
+    pitch: z.number().optional().describe('Camera elevation in degrees (default 20)'),
+    txd: z.string().optional().describe('Force a texture dictionary name when the material textures live elsewhere'),
+    saveAs: z.string().optional().describe('Asset file name to save as (default: the model id or model name)'),
+  },
+  async ({ model, file, rot, zoom, vehCol, width, height, background, yaw, pitch, txd, saveAs }) => {
+    try {
+      ensureRoot();
+      const ref = file || (model === undefined ? '' : String(model));
+      if (!ref) return { content: [{ type: "text" as const, text: 'Error: pass model (id/name) or file (.dff path)' }], isError: true };
+      const rgba = background ? parseBackground(background) : null;
+      const result = await models.preview(ref, {
+        rot: rot ? [rot[0] ?? 0, rot[1] ?? 0, rot[2] ?? 0] : undefined,
+        zoom,
+        vehCol: vehCol && vehCol.length >= 2 ? [vehCol[0], vehCol[1]] : undefined,
+        width: width ?? 256,
+        height: height ?? width ?? 256,
+        background: rgba,
+        cameraYaw: yaw,
+        cameraPitch: pitch,
+        txd,
+        saveAs,
+      });
+      const lines = [
+        `Model: ${result.model} (${result.source})`,
+        `PNG: ${result.file} · ${result.width}x${result.height} · ${result.bytes} bytes`,
+        `Mesh: ${result.mesh.vertices} vertices · ${result.mesh.triangles} triangles · ${result.mesh.materials} materials (${result.mesh.texturedMaterials} textured)`,
+        `Model: ${result.stats.atomics} atomics · ${result.stats.frames} frames (${result.stats.dummies} dummies) · ${result.stats.materials} materials${result.stats.skinned ? ' · skinned' : ''}`, 
+        `Render: rot ${result.render.rot.map((v) => v.toFixed(1)).join('/')} zoom ${result.render.zoom} · ${result.render.drawn} triangles visible · ${(result.render.coverage * 100).toFixed(1)}% covered`,
+        result.textures.used.length ? `Textures drawn: ${result.textures.used.join(', ')}` : 'Textures drawn: none (untextured materials)',
+        result.textures.missing.length ? `Textures without a .txd/PNG: ${result.textures.missing.join(', ')}` : 'All material textures resolved.',
+        result.warnings.length ? `Warnings:\n${result.warnings.join('\n')}` : 'Warnings: none.',
+        'A font 5 textdraw using this model id (or the saveAs name) now shows this PNG in textdraw_preview.',
+      ];
+      return { content: [{ type: "text" as const, text: lines.join('\n') }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "model_export",
+  "Export a GTA model for external tools: Wavefront OBJ + MTL, or glTF 2.0, with every resolved .txd/PNG texture written next to it as a PNG. Use it to inspect or edit a model in Blender/three.js, or to check that a custom .dff/.txd pair looks right.",
+  {
+    model: z.union([z.number(), z.string()]).optional().describe('Model id, a .dff path, or a model name (also searched inside indexed .img archives)'),
+    file: z.string().optional().describe('Explicit .dff path (alternative to model)'),
+    format: z.enum(["obj", "gltf"]).optional().describe('obj (default, + MTL) or gltf (glTF 2.0 JSON)'),
+    out: z.string().optional().describe('Output directory (default .samp-mcp/model-export/<model>)'),
+    txd: z.string().optional().describe('Force a texture dictionary name'),
+  },
+  async ({ model, file, format, out, txd }) => {
+    try {
+      ensureRoot();
+      const ref = file || (model === undefined ? '' : String(model));
+      if (!ref) return { content: [{ type: "text" as const, text: 'Error: pass model (id/name) or file (.dff path)' }], isError: true };
+      const result = await models.exportModel(ref, { format: format === 'gltf' ? 'gltf' : 'obj', out, txd });
+      const lines = [
+        `Exported ${result.model} (${result.source}) as ${result.format}`,
+        ...result.files.map((f) => `  ${f}`),
+        `Mesh: ${result.mesh.vertices} vertices · ${result.mesh.triangles} triangles · ${result.mesh.materials} materials`,
+        result.textures.exported.length ? `Textures exported: ${result.textures.exported.join(', ')}` : 'Textures exported: none',
+        result.textures.missing.length ? `Textures without a .txd/PNG: ${result.textures.missing.join(', ')}` : 'All material textures resolved.',
+      ];
+      return { content: [{ type: "text" as const, text: lines.join('\n') }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
 // Prompt: SAMP Developer Setup
 server.prompt(
   "SAMP_DEVELOPER_SETUP",
@@ -1144,7 +1541,8 @@ GUIDELINES:
 1. samp-mcp handles SAMP server operations only (status, RCON, compile, audits).
 2. For ALL file reads/writes/edits on .pwn/.inc/.cfg/logs, use samp-mcp's file_* tools (file_read/file_write/file_edit/file_grep — delegated to encoding-aware mcp-file-tools) — never plain editors that would corrupt Windows-874 Thai.
 3. Use the 'aaa_mandatory_read_first_guidelines' tool to see the full project rules.
-4. Keep the original language — do NOT translate existing strings.${p.hasSystemModules ? `\n5. When building NEW systems/features, follow the project's module pattern: ONE module under gamemodes/includes/system (use generate_boilerplate type=module/job/autofarm and design_feature, which now emit module-aware plans), register it in gamemodes/main.pwn, and never put gameplay logic in main.pwn.` : ''}`
+4. Keep the original language — do NOT translate existing strings.${p.hasSystemModules ? `\n5. When building NEW systems/features, follow the project's module pattern: ONE module under gamemodes/includes/system (use generate_boilerplate type=module/job/autofarm and design_feature, which now emit module-aware plans), register it in gamemodes/main.pwn, and never put gameplay logic in main.pwn.` : ''}
+5. HUD/UI work goes through the textdraw editor: textdraw_create / textdraw_update / textdraw_import keep the design in a project file, textdraw_preview shows it on a web page (serve=true = draggable, saveable editor, drag a model preview to orbit it), txd_scan decodes .txd dictionaries for font 4 sprites, model_scan/model_preview/model_export handle the 3D side (loose .dff/.txd, .img archives, font 5 previews), textdraw_export emits the Pawn code (mode=module for a system module).`
         }
       }]
     };

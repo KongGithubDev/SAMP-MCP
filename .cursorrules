@@ -13,6 +13,7 @@
    - samp-mcp is for SAMP server operations: status/query, RCON, compile ('compile_pawn' / 'compile_and_load_pawn'), audits ('audit_script', 'audit_sql', 'audit_performance', 'find_shadowing'), 'check_includes', 'get_server_diagnostics', 'manage_server', plugin/include installs.
    - samp-mcp does NOT read or write script files.
    - Prefer 'generate_boilerplate' / 'design_feature' for new features.
+   - HUD/UI textdraws: use the textdraw editor tools (textdraw_create/update/import, txd_scan for .txd sprites, model_scan/model_preview/model_export for font 5 3D model previews (.dff/.txd, .img archives), textdraw_preview for the web preview + draggable editor, textdraw_export to emit the Pawn code) instead of hand-writing coordinates.
 
 4. **ARCHITECTURE (module pattern, when detected)**:
    - Build every new feature as ONE self-contained module under `gamemodes/includes/system/<name>.inc` (jobs: `system/job/j_<name>.inc`) — each module owns its state/hooks/commands/dialogs via YSI y_hooks (`hook OnGameModeInit` / `OnPlayerConnect` / `OnPlayerDisconnect` / `OnPlayerKeyStateChange`).
