@@ -14,6 +14,7 @@
    - samp-mcp does NOT read or write script files.
    - Prefer 'generate_boilerplate' / 'design_feature' for new features.
    - HUD/UI textdraws: use the textdraw editor tools (textdraw_create/update/import, txd_scan for .txd sprites, model_scan/model_preview/model_export for font 5 3D model previews (.dff/.txd, .img archives), textdraw_preview for the web preview + draggable editor, textdraw_export to emit the Pawn code) instead of hand-writing coordinates.
+   - Custom .txd textures: edit them with the TXD editor tools (txd_open, txd_import_texture to turn a PNG into a texture with the format/mip levels you want (DXT compresses at quality=high by default), txd_texture for rename/duplicate/remove/convert, txd_export_texture, txd_save to write the file or the .img entry) instead of rebuilding dictionaries with external tools.
 
 4. **ARCHITECTURE (module pattern, when detected)**:
    - Build every new feature as ONE self-contained module under `gamemodes/includes/system/<name>.inc` (jobs: `system/job/j_<name>.inc`) — each module owns its state/hooks/commands/dialogs via YSI y_hooks (`hook OnGameModeInit` / `OnPlayerConnect` / `OnPlayerDisconnect` / `OnPlayerKeyStateChange`).

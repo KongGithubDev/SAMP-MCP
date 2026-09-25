@@ -32,6 +32,43 @@ Requires **Node.js ≥ 18** and a functional **SA-MP server** directory.
 
 File tools need the [mcp-file-tools](https://github.com/dimitar-grigorov/mcp-file-tools) binary — samp-mcp finds it at its default install location, or you can point to it explicitly with the `SAMP_MCP_FILE_TOOLS_COMMAND` environment variable.
 
+### Updating
+
+Already installed? Install the same package again — this always resolves the `latest` tag, so it is the most reliable way to update:
+
+```sh
+npm install -g @konggithubdev/samp-mcp
+# or
+yarn global add @konggithubdev/samp-mcp
+```
+
+npm's own update command works too, with one catch:
+
+```sh
+npm update -g @konggithubdev/samp-mcp   # update within the installed major (1.2.0 -> 1.3.0)
+npm outdated -g --depth=0               # list every global package that is behind
+npm list -g @konggithubdev/samp-mcp     # the version you currently have
+```
+
+`npm update -g` treats a global install as if it had been declared with a caret range (`^1.0.12`), so it never crosses a major version — reach for `npm install -g` when you want the latest regardless. Called without a package name, it updates **every** global package on the machine and downgrades anything that is ahead of `latest`, so keep it scoped to this package.
+
+The `~/.npmrc` setup above is required for updates exactly as it is for the first install: without the `@konggithubdev:registry` line npm looks for the package on npmjs.com and reports `404 Not Found`, and without the `//npm.pkg.github.com/:_authToken` line it reports `401 Unauthorized`. On Linux/macOS a global install fails with `EACCES` if the npm prefix is not writable — the usual fixes are a Node version manager (nvm) or npm's own prefix setting.
+
+**Restart your MCP client afterwards.** The running server keeps the old code in memory, so an open session keeps using the previous version until the client (Claude Desktop, Cursor, Windsurf, …) reconnects.
+
+The server can also update itself from inside a session:
+
+| Tool | What it does |
+|---|---|
+| `check_for_updates` | Compares the running version with the latest one published to GitHub Packages (`npm view @konggithubdev/samp-mcp version --registry=https://npm.pkg.github.com`) |
+| `update_mcp_server` | Runs the global install for you and asks you to restart the client |
+
+To see the version you currently have installed:
+
+```sh
+npm list -g @konggithubdev/samp-mcp
+```
+
 ---
 
 ## Textdraw Editor
@@ -41,7 +78,7 @@ samp-mcp can design SA-MP textdraws (HUD, UI, logos, sprite/`txd` art) as projec
 **Workflow**
 
 1. `textdraw_create` (or `textdraw_import` from existing `TextDrawCreate` code / another editor's project JSON) — textdraws are stored in `<server root>/.samp-mcp/textdraws/<project>.json`, so a UI can be reviewed, diffed and versioned next to the gamemode.
-2. `txd_scan` — reads the `.txd` texture dictionaries on the machine, lists their textures (size/format) and decodes them to PNG (8888/888/565/555/4444/LUM8 and DXT1/3/5).
+2. `txd_scan` (read-only survey) or the **TXD editor** (`txd_open` → `txd_import_texture` / `txd_texture` → `txd_save`) — read, build and edit the actual `.txd` texture dictionaries (8888/888/565/555/4444/LUM8 and DXT1/3/5, mip maps included) instead of shipping bitmaps by hand. See *TXD editor* below.
 3. `model_scan` + `model_preview` — for font 5 (3D preview) textdraws: finds the `.dff` models on the machine (loose files, the server's `models/` folder, or inside a VER2 `.img` archive such as `gta3.img`/`samp.img`), pairs them with their `.txd` textures, and renders the model to the PNG the textdraw shows. `model_export` writes OBJ+MTL or glTF for Blender/three.js. See *3D models* below.
 4. `textdraw_preview` — renders every textdraw on a web page using the classic 640x448 grid scaled to real resolutions, with boxes, alignment, colours, outline/shadow, decoded font 4 sprites and real rendered font 5 model previews (drag a model to orbit it, wheel to zoom). `serve=true` also starts a live editor server (`127.0.0.1`) where textdraws can be dragged on screen and saved straight back into the project file.
 5. `textdraw_export` — emits ready-to-use Pawn: `statements`, `declarations`, a full system-module `.inc` (y_hooks + show/hide stocks), a markdown table or raw JSON.
@@ -62,6 +99,25 @@ samp-mcp can design SA-MP textdraws (HUD, UI, logos, sprite/`txd` art) as projec
 - Pairs each material texture with a matching `.txd` (the model's sibling dictionary, the `AddSimpleModel` txd, the `.txd` files found by the scan, or a design-time PNG), decodes 8888/888/565/555/4444/LUM8/DXT1/3/5, and falls back to `.samp-mcp/textdraw-assets/sprites/<txd>__<texture>.png` for art that has no dictionary yet.
 - Renders with z-buffering, bilinear texture sampling (wrap/mirror/clamp), per-vertex colours, material colour and alpha, camera-fixed key/fill/rim lighting and 2x supersampling. `rot` follows `TextDrawSetPreviewRot` (rx tilts, rz yaws), `zoom` follows the zoom argument, `vehCol` recolours the body parts vehicle materials mark, and `yaw`/`pitch` orbit the camera.
 - `model_export` writes Wavefront OBJ + MTL or glTF 2.0 (one primitive per material, textures dumped as PNG next to it).
+
+**TXD editor (textures)**
+
+Font 4 sprites and 0.3.DL custom UI textures live inside `.txd` dictionaries, which is what the `txd_*` editing tools build and maintain — the same job Magic.TXD does, driven through MCP tools and verified against the files themselves:
+
+- `txd_open` opens a dictionary from a file **or from inside a VER2 `.img` archive** (`img: models/gta3.img` + `entry: vehicle.txd`), or creates a new one (`create: true`), and lists every texture with its size, raster format, mip levels, section bytes and whether it can be decoded. The dictionary stays in memory for the following calls.
+- `txd_import_texture` turns a PNG into a texture: `format` = `8888` (lossless, the default), `888`, `565`, `555`, `4444`, `LUM8`, or the compressed `DXT1`/`DXT3`/`DXT5` (seeded cluster fit with least-squares endpoint refinement — squish-style — 1-bit alpha for DXT1, 8-value alpha for DXT5), `mipmaps` = `1` (stock SA), a count, `full` (halves down to 1x1, like Magic.TXD) or `keep`. Re-importing an existing name replaces that texture in place.
+- `txd_texture` renames (patching the `char[32]` name field, so it also works for rasters this build cannot decode), duplicates, removes, or converts a texture to another raster format/mip count.
+- DXT compression runs at `quality: high` by default — a range fit only seeds the search; from there the encoder alternates nearest-palette-entry assignment with a **least-squares endpoint fit** (the normal-equation solution per channel), scores every candidate against the palette the game will actually decode, and keeps the best. DXT5 alpha screens the quartile pairings of the block's own alphas (plus a coarse alpha grid) and refines the best four, so a smooth alpha ramp keeps its steps and a hard mask keeps its 0/255 edges. `quality: fast` keeps the old single range fit for bulk conversions.
+- `txd_export_texture` decodes textures — including imports that are not saved yet — to PNG, so art can be checked or edited in a paint tool.
+- `txd_save` writes the dictionary back: to its own file (copying the previous one to `<name>.txd.bak` first), to a new `.txd` (`out`), or **into the `.img` entry it came from** (rewritten in place, or appended at the end of the archive when it needs more sectors — the directory slot is the only other thing touched, so nothing else in a multi-gigabyte `gta3.img` moves). The written bytes are parsed back before the result is reported, and `discard: true` throws the edits away instead.
+- Textures that were not edited are written back **byte for byte** from the original file, so Direct3D 8 dictionaries, paletted rasters and formats this build cannot re-encode survive a save untouched.
+
+Fidelity of the writer (all measured, not assumed): a complete dictionary rebuilt from its own decoded pixels reproduces stock GTA: SA files like `models/vehicle.txd` (19 textures), `models/effectsPC.txd` (36 textures) and `background.txd` byte for byte; the mipmap layout matches what Magic.TXD writes (level 0 directly after the 92-byte header, every later level preceded by its own `u32` byte length, `0x8000` in `rasterFormat` and the `0x1106` filter when mipmapped); and the round trip is exercised per format by `npm run test:txd` (90 checks) plus the MCP-level checks in `npm run test:textdraw`.
+
+The cost of that search (512x512 source, measured): DXT1 64 ms → 340 ms, DXT5 75 ms → 1.6 s. Fast exists for bulk work on many large textures; high is the default because one dictionary save is not a batch job.
+
+DXT quality is measured, not claimed: `npm run test:txd-quality` writes gradient / photo-noise / UI-sprite / alpha-mask images (and real textures out of the game's own dictionaries) through the writer and back through the reader, scores PSNR (colour over opaque pixels, alpha over all, plus the transparent/opaque decision), and compares three encoders. Against the original single range fit the cluster/least-squares path gains **+1.39 dB mean colour PSNR, up to +4.96 dB** (a hard-edged alpha mask) and never loses a pixel anywhere, **+2.43 dB** on DXT5 alpha ramps; against a brute-effort reference that enumerates every endpoint pair the block implies and refines six rounds, it stays within **0.14 dB** (colour) and **0.00 dB** (alpha), i.e. the extra search buys essentially nothing — the seeds and early exit cost almost nothing either. That benchmark is part of `npm run check` (74 checks, ~1s).
+
 **Fidelity — what is exact, what is approximated**
 
 Exact (data level, verified by the round-trip check in `npm run demo:textdraw`):
@@ -223,10 +279,20 @@ Copy and paste this as your **first prompt** to the AI:
 | `textdraw_export` | Export Pawn: statements, declarations, a system-module `.inc`, markdown or JSON |
 | `textdraw_preview` | Render the web preview page; `serve=true` starts the draggable live editor |
 | `textdraw_preview_server` | Start / stop / status of the live preview+editor server on 127.0.0.1 |
-| `txd_scan` | Scan `.txd` dictionaries, list textures and decode them to PNG for the preview |
 | `model_scan` | Find `.dff` models (loose files, `models/`, VER2 `.img` archives) + their `.txd` textures and the model ids the projects use |
 | `model_preview` | Render a model (id / file / name / `.img` entry) to the PNG a font 5 textdraw shows, with `rot`/`zoom`/`vehCol`/camera controls |
 | `model_export` | Export a model as OBJ+MTL or glTF 2.0 with its textures as PNG |
+
+### TXD Editor (textures)
+
+| Command | Description |
+|---|---|
+| `txd_scan` | Read-only survey: scan the server for `.txd` dictionaries, list their textures and decode them to PNG for the preview page |
+| `txd_open` | Open a `.txd` for editing (file, `.img` entry, or `create=true`) and list its textures; with no arguments it lists the open dictionaries |
+| `txd_import_texture` | Import a PNG as a texture (format, mip levels and DXT `quality`), replacing the texture when the name exists |
+| `txd_texture` | Rename / duplicate / remove / convert one texture of an open dictionary (DXT `quality` too) |
+| `txd_export_texture` | Decode the dictionary's textures (unsaved edits included) to PNG files |
+| `txd_save` | Write the dictionary to its file (`.bak` kept), to a new `.txd`, or into its VER2 `.img` entry; `discard=true` drops the edits |
 
 ### Meta
 
@@ -244,6 +310,7 @@ Copy and paste this as your **first prompt** to the AI:
 - **Pawn Intelligence** — pawncc compile with structured errors, audits (SQL / performance / shadowing), include checks, log diagnostics
 - **Encoding-Safe File Access** — built-in `file_read`/`file_write`/`file_edit`/`file_grep`/… tools delegate to `mcp-file-tools`, which auto-detects Windows-874 (Thai) and preserves CRLF
 - **Textdraw Editor** — textdraw projects (JSON), txd sprite decoding, DFF model rendering (loose `.dff`/`.txd`, `.img` archives), web preview page + live drag-and-save editor with model orbiting, Pawn import/export
+- **TXD Editor** — read, build and edit RenderWare texture dictionaries like Magic.TXD does: import PNGs as textures (8888/888/565/555/4444/LUM8/DXT1/DXT3/DXT5, mip chains, squish-style DXT compression at `quality: high`), rename/duplicate/remove/convert, export PNGs, and save back to the `.txd` or into its VER2 `.img` entry — untouched textures stay byte for byte
 - **Plugin Auto-Install** — GitHub release discovery with ZIP auto-extraction
 - **Web Search** — DuckDuckGo integration for SAMP-related queries
 - **Caching** — Project info cached for 5 minutes to reduce token usage
@@ -255,7 +322,7 @@ Copy and paste this as your **first prompt** to the AI:
 
 ```sh
 npm install        # includes dev tooling (eslint, typescript-eslint, ts-prune)
-npm run check      # lint + dead-code checks + build + model/textdraw tests (also runs before publish)
+npm run check      # lint + dead-code checks + build + model/txd/textdraw tests (also runs before publish)
 ```
 
 Smoke test / demo of the textdraw editor (writes a throwaway project + synthetic `.txd` under `.freebuff/textdraw-demo`):
@@ -270,7 +337,19 @@ Smoke test of the model pipeline (builds a cube `.dff`/`.txd`/`.img` from the Re
 npm run test:model
 ```
 
-End-to-end test of the textdraw **MCP tools** — it starts the real stdio server and calls all nine tools the way an agent does, so tool names, argument schemas and result shapes are covered too (part of `npm run check`):
+Test of the TXD **writer and editor** (round-trips every raster format, checks the mip layout against the sizes the formats imply, rebuilds real GTA: SA dictionaries from their own pixels byte for byte, then drives the editor through import/convert/rename/duplicate/remove/export/save and a `.img` write — 90 checks, under `.freebuff/txd-demo`; the real-file part needs `D:/GTASAN Muntiplayer` or `SAMP_TXD_SAMPLE_DIR` and is skipped without it):
+
+```sh
+npm run test:txd
+```
+
+PSNR benchmark of the DXT encoders — `quality: high` against `quality: fast` against a brute-effort reference encoder, on synthetic images plus textures decoded out of the game's dictionaries (74 checks, ~1s):
+
+```sh
+npm run test:txd-quality
+```
+
+End-to-end test of the textdraw and TXD **MCP tools** — it starts the real stdio server and calls them the way an agent does, so tool names, argument schemas and result shapes are covered too (part of `npm run check`):
 
 ```sh
 npm run test:textdraw
@@ -291,9 +370,9 @@ Individual gates:
 `.github/workflows/publish.yml` publishes to GitHub Packages on any of these triggers:
 
 ```sh
-npm version 1.2.1 --no-git-tag-version && git commit -am "chore: release v1.2.1"
+npm version 1.3.1 --no-git-tag-version && git commit -am "chore: release v1.3.1"
 git push origin main
-git tag v1.2.1 && git push origin v1.2.1   # tag push -> workflow publishes
+git tag v1.3.1 && git push origin v1.3.1   # tag push -> workflow publishes
 ```
 
 Publishing a GitHub Release, or running the workflow manually (`workflow_dispatch`), does the same thing.

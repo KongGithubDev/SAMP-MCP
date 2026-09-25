@@ -1,14 +1,18 @@
 import * as fs from 'fs/promises';
 
 /**
- * Minimal reader for GTA IMG archives (VER2, the format San Andreas and SA-MP
- * 0.3.DL use for gta3.img / samp.img).
+ * Minimal reader/writer for GTA IMG archives (VER2, the format San Andreas and
+ * SA-MP 0.3.DL use for gta3.img / samp.img).
  *
- * Only indexing and single-entry extraction are implemented: model previews
- * need to pull one .dff/.txd out of a multi-gigabyte archive, never rewrite it.
- * The index is read on its own (header + 32 bytes per entry), so scanning a
- * stock 900 MB gta3.img costs ~500 KB and a few milliseconds instead of reading
- * the whole archive.
+ * Indexing and single-entry extraction are the main use: model previews need to
+ * pull one .dff/.txd out of a multi-gigabyte archive. The index is read on its
+ * own (header + 32 bytes per entry), so scanning a stock 900 MB gta3.img costs
+ * ~500 KB and a few milliseconds instead of reading the whole archive.
+ *
+ * writeImgEntry replaces one existing entry: in place when the new file fits
+ * the already allocated sectors, otherwise at the end of the archive. Nothing
+ * else in the archive is ever touched and no entry is ever removed — the
+ * directory keeps its size and entry order.
  *
  * Layout (VER2), verified against a stock GTA: SA gta3.img:
  *   char[4]   "VER2"
@@ -21,6 +25,8 @@ import * as fs from 'fs/promises';
 
 interface ImgEntry {
   name: string;
+  /** Slot in the directory table (8 + index * 32), so an entry can be rewritten. */
+  index: number;
   sector: number;
   /** Size field as stored (whole sectors in the standard format). */
   size: number;
@@ -79,10 +85,13 @@ export async function readImgIndex(file: string, limit = 0): Promise<ImgArchive>
       if (!name) continue;
       const start = sector * IMG_SECTOR;
       const bySectors = size * IMG_SECTOR;
-      // Tools that rebuild an IMG sometimes store the byte size instead; fall
-      // back to it when whole sectors would run past the end of the file.
-      const byteLength = start < stat.size && start + bySectors <= stat.size ? bySectors : size;
-      archive.entries.push({ name, sector, size, byteLength });
+      // The size field counts whole 2048-byte sectors, but the last entry of an
+      // archive is usually not padded out to a full sector (and some editors
+      // even store a byte length here), so a run that would pass the end of the
+      // file is clamped to what the file actually holds. The extracted block is
+      // trimmed to its own RenderWare chunk size afterwards either way.
+      const byteLength = start >= stat.size ? 0 : Math.min(bySectors > 0 ? bySectors : size, stat.size - start);
+      archive.entries.push({ index: i, name, sector, size, byteLength });
     }
     archive.listed = wanted;
   } catch (error: any) {
@@ -127,6 +136,66 @@ function trimRenderWareBlock(buffer: Buffer): Buffer {
   const declared = buffer.readUInt32LE(4) + 12;
   if (declared >= 12 && declared <= buffer.length) return buffer.subarray(0, declared);
   return buffer;
+}
+
+export interface ImgWriteResult {
+  file: string;
+  entry: string;
+  bytes: number;
+  sectors: number;
+  /** Sectors the entry owned before this write. */
+  previousSectors: number;
+  sector: number;
+  /** In place when the new data fit the allocated sectors, appended otherwise. */
+  mode: 'in-place' | 'appended';
+  /** Bytes left unused at the end of the allocated run (in-place writes). */
+  slack: number;
+}
+
+/**
+ * Replaces the data of an existing entry. In-place while the new file fits the
+ * sectors the entry already owns (the rest of the run is left as slack, which
+ * every RenderWare reader skips because the chunk sizes say where the file
+ * ends); otherwise the data is appended at the end of the archive and only the
+ * entry's 32-byte directory slot is updated — existing data is never moved or
+ * overwritten.
+ */
+export async function writeImgEntry(file: string, entry: ImgEntry, data: Buffer): Promise<ImgWriteResult> {
+  if (data.length === 0) throw new Error('refusing to write an empty entry into an IMG archive');
+  const sectors = Math.ceil(data.length / IMG_SECTOR);
+  let handle: fs.FileHandle | null = null;
+  try {
+    handle = await fs.open(file, 'r+');
+    const stat = await handle.stat();
+    const allocated = Math.min(entry.byteLength, stat.size - entry.sector * IMG_SECTOR);
+    const fits = entry.byteLength >= data.length
+      && entry.sector * IMG_SECTOR + entry.byteLength <= stat.size;
+    const mode: ImgWriteResult['mode'] = fits ? 'in-place' : 'appended';
+    let sector = entry.sector;
+    let slack = 0;
+
+    if (fits) {
+      await handle.write(data, 0, data.length, entry.sector * IMG_SECTOR);
+      slack = allocated - data.length;
+    } else {
+      sector = Math.ceil(stat.size / IMG_SECTOR);
+      const padding = sector * IMG_SECTOR - stat.size;
+      if (padding > 0) await handle.write(Buffer.alloc(padding), 0, padding, stat.size);
+      await handle.write(data, 0, data.length, sector * IMG_SECTOR);
+    }
+
+    const slot = Buffer.alloc(8);
+    slot.writeInt32LE(sector, 0);
+    slot.writeInt32LE(sectors, 4);
+    await handle.write(slot, 0, 8, 8 + entry.index * IMG_ENTRY_SIZE);
+
+    entry.sector = sector;
+    entry.size = sectors;
+    entry.byteLength = sectors * IMG_SECTOR;
+    return { file, entry: entry.name, bytes: data.length, sectors, previousSectors: Math.round(allocated / IMG_SECTOR), sector, mode, slack };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 /** Case-insensitive lookup inside an archive index (the extension is optional). */

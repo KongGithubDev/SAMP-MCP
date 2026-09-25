@@ -14,7 +14,7 @@
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { encodePng } from '../dist/txd.js';
@@ -217,6 +217,63 @@ try {
         check('POST /api/model re-renders on demand (orbit + wheel zoom)', String(rendered.url ?? '').startsWith('data:image/png;base64,'), rendered.source ?? JSON.stringify(rendered).slice(0, 80));
         check('the live render reuses the decoded texture', Array.isArray(rendered.missing) && rendered.missing.length === 0, (rendered.missing ?? []).join(','));
     }
+
+    // ---- TXD editor ------------------------------------------------------
+    const txdTools = ['txd_open', 'txd_import_texture', 'txd_texture', 'txd_export_texture', 'txd_save'];
+    check('the five TXD editing tools are advertised', txdTools.every((t) => tools.includes(t)), `${tools.length} tools total`);
+
+    const txdOpened = await call('txd_open', { file: 'custom/sign.txd' });
+    check('txd_open lists the dictionary and its textures',
+        txdOpened.id === 'custom/sign.txd' && txdOpened.textures.length === 1 && txdOpened.textures[0].name === MODEL_TXD,
+        `${txdOpened.textures?.length} texture(s): ${txdOpened.textures?.map((t) => t.name).join(',')}`);
+    check('txd_open reports format, size and mip levels',
+        txdOpened.textures[0].format === '8888' && txdOpened.textures[0].width === 32 && txdOpened.textures[0].levels === 1,
+        JSON.stringify(txdOpened.textures[0]));
+
+    const txdImport = await call('txd_import_texture', {
+        txd: 'custom/sign.txd',
+        png: '.samp-mcp/textdraw-assets/sprites/test__badge.png',
+        name: 'sign_badge',
+        format: 'DXT5',
+        mipmaps: 'full',
+    });
+    const importedTexture = txdImport.textures.find((t) => t.name === 'sign_badge');
+    check('txd_import_texture adds a PNG as a DXT5 texture with a full mip chain',
+        Boolean(importedTexture) && importedTexture.format === 'DXT5' && importedTexture.levels === 3,
+        JSON.stringify(importedTexture));
+    check('the imported texture reports the same format the writer uses',
+        txdImport.textures.length === 2 && txdImport.dirty === true, `${txdImport.textures.length} texture(s)`);
+
+    const txdRename = await call('txd_texture', { txd: 'custom/sign.txd', action: 'rename', texture: 'sign_badge', name: 'sign_badge2' });
+    check('txd_texture rename renames in place', txdRename.textures.some((t) => t.name === 'sign_badge2'), txdRename.textures.map((t) => t.name).join(','));
+    const txdConvert = await call('txd_texture', { txd: 'custom/sign.txd', action: 'convert', texture: 'sign_badge2', format: '4444', mipmaps: 2 });
+    const convertedTexture = txdConvert.textures.find((t) => t.name === 'sign_badge2');
+    check('txd_texture convert changes the raster format and level count',
+        convertedTexture.format === '4444' && convertedTexture.levels === 2, JSON.stringify(convertedTexture));
+    const txdDuplicate = await call('txd_texture', { txd: 'custom/sign.txd', action: 'duplicate', texture: 'sign_badge2', name: 'sign_badge3' });
+    check('txd_texture duplicate copies it under a new name', txdDuplicate.textures.length === 3 && txdDuplicate.textures[2].name === 'sign_badge3', txdDuplicate.textures.map((t) => t.name).join(','));
+    const txdRemove = await call('txd_texture', { txd: 'custom/sign.txd', action: 'remove', texture: 'sign_badge3' });
+    check('txd_texture remove drops it again', txdRemove.textures.length === 2, txdRemove.textures.map((t) => t.name).join(','));
+
+    const txdExport = await call('txd_export_texture', { txd: 'custom/sign.txd', texture: 'sign_badge2' });
+    const exportedFile = path.join(root, txdExport.files?.[0]?.file ?? '');
+    check('txd_export_texture decodes the unsaved texture to a PNG',
+        txdExport.files?.length === 1 && (await readFile(exportedFile).catch(() => null))?.subarray(1, 4).toString('latin1') === 'PNG',
+        txdExport.files?.[0]?.file ?? 'no file');
+
+    const txdSave = await call('txd_save', { txd: 'custom/sign.txd' });
+    check('txd_save writes the dictionary and reports what it wrote',
+        txdSave.target === 'file' && txdSave.bytes > 0 && txdSave.backup === 'custom/sign.txd.bak', JSON.stringify(txdSave));
+    const txdReopen = await call('txd_open', { file: 'custom/sign.txd' });
+    check('the saved dictionary holds the edited textures',
+        txdReopen.textures.map((t) => `${t.name}:${t.format}`).join(' ') === `${MODEL_TXD}:8888 sign_badge2:4444`,
+        txdReopen.textures.map((t) => `${t.name}:${t.format}`).join(' '));
+    const txdDiscard = String(await call('txd_save', { txd: 'custom/sign.txd', discard: true }));
+    check('txd_save discard=true closes the workspace without writing', txdDiscard.includes('without saving'), txdDiscard);
+
+    const modelAfterTxdEdit = String(await call('model_preview', { model: 'sign', width: 96, height: 96 }));
+    check('model_preview still renders the model after its dictionary was rewritten',
+        modelAfterTxdEdit.includes('Textures drawn:'), modelAfterTxdEdit.match(/Textures drawn:.*/)?.[0] ?? '');
 
     const removed = await call('textdraw_delete', { project: 'test', targets: ['gBadge'] });
     check('textdraw_delete removes by name', removed.removed.length === 1 && removed.left === 3, `left ${removed.left}`);

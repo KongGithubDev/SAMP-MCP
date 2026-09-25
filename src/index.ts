@@ -8,13 +8,21 @@ import { SampClient } from './client.js';
 import { PawnManager } from './scripts.js';
 import { FileToolsBridge } from './filetools.js';
 import { TextdrawManager } from './textdraw.js';
+import {
+  TxdEditorManager,
+  type TxdExportResult,
+  type TxdImportOptions,
+  type TxdSaveResult,
+  type TxdTextureInfo,
+  type TxdWorkspaceInfo,
+} from './txd-edit.js';
 import { models } from './model.js';
 
 // dotenv quiet mode keeps JSON-RPC on stdout clean
 process.env.DOTENV_CONFIG_QUIET = 'true';
 dotenv.config({ quiet: true });
 
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.0";
 
 const server = new McpServer({
   name: "samp-mcp-server",
@@ -25,6 +33,7 @@ let client: SampClient | null = null;
 const pawn = new PawnManager();
 const fileTools = new FileToolsBridge();
 const textdraw = new TextdrawManager();
+const txdEditor = new TxdEditorManager();
 
 // Resources for persistent context
 server.resource(
@@ -61,6 +70,7 @@ async function updateConnection(root: string, hostOverride?: string, portOverrid
     client?.close(); // close previous socket before replacing
     client = new SampClient(host, port, password);
     textdraw.setRoot(root);
+    txdEditor.setRoot(root);
     console.error(`Connected to SAMP server at: ${root} (Host: ${host}, Port: ${port})`);
     return { root, port, password };
 }
@@ -1390,6 +1400,192 @@ server.tool(
   }
 );
 
+server.tool(
+  "txd_open",
+  "Open a RenderWare texture dictionary (.txd) for editing, the way Magic.TXD does: a file on the server, a dictionary inside a VER2 .img archive (img + entry), or a brand new one (create=true). Lists every texture with its size, raster format, mip levels and section bytes, and keeps the dictionary in memory so txd_import_texture / txd_texture / txd_export_texture / txd_save can work on it. Nothing is written to disk until txd_save. With no arguments it lists the dictionaries currently open.",
+  {
+    file: z.string().optional().describe('Path to the .txd, relative to the server root or absolute'),
+    img: z.string().optional().describe('Path to a VER2 .img archive to take the dictionary from (e.g. models/gta3.img)'),
+    entry: z.string().optional().describe('The .txd name inside that archive (used together with img)'),
+    create: z.boolean().optional().describe('Create the dictionary when the file does not exist yet'),
+  },
+  async ({ file, img, entry, create }) => {
+    try {
+      ensureRoot();
+      if (!file && !img) {
+        const open = txdEditor.list();
+        const lines = open.length
+          ? open.map((w) => `  ${w.id} — ${w.textures.length} textures${w.dirty ? ' (unsaved changes)' : ''}`)
+          : ['  (none)'];
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Open dictionaries:\n${lines.join('\n')}\n\nPass file (a .txd path), img + entry (a dictionary inside an archive), or create=true to open one.\ntxd_scan lists the .txd files of this server and decodes them to PNG.`,
+          }, { type: "text" as const, text: JSON.stringify({ open }, null, 2) }],
+        };
+      }
+      const workspace = await txdEditor.open({ file, img, entry, create });
+      return { content: [{ type: "text" as const, text: formatTxdWorkspace(workspace) }, { type: "text" as const, text: JSON.stringify(workspace, null, 2) }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "txd_import_texture",
+  "Import a PNG into an open dictionary as a texture: re-encode it into 8888/888/565/555/4444/LUM8/DXT1/DXT3/DXT5, generate the mip chain, and replace the texture when the name already exists. The DXT formats use a squish-style encoder (cluster fit with least-squares endpoint refinement) by default — quality=fast trades a little fidelity for speed on bulk conversions. This is how a custom sprite or 0.3.DL UI texture is authored (draw the PNG, import it here, txd_save, then reference it as font 4 \"txdname:texturename\"). Nothing is written to disk until txd_save.",
+  {
+    txd: z.string().optional().describe('Open dictionary: its id/path (as returned by txd_open), or a .txd path to open on the fly'),
+    png: z.string().describe('PNG file to import (relative to the server root or absolute)'),
+    name: z.string().optional().describe('Texture name (default: the PNG file name). Max 31 printable ASCII characters'),
+    format: z.enum(["auto", "8888", "888", "565", "555", "4444", "LUM8", "DXT1", "DXT3", "DXT5"]).optional().describe('Raster format (default auto = 8888, lossless; DXT1/DXT5 compress)'),
+    mipmaps: z.union([z.number(), z.enum(["full", "keep"])]).optional().describe('Mip levels: a count, "full" for the whole chain down to 1x1, or "keep" to copy the replaced texture (default 1, like stock SA dictionaries)'),
+    mask: z.string().optional().describe('Optional mask texture name for the char[32] mask field'),
+    replace: z.boolean().optional().describe('Overwrite when the name exists (default true)'),
+    quality: z.enum(["high", "fast"]).optional().describe('DXT block-compression effort (default high = cluster fit + least-squares endpoint refinement; fast = single range fit). Ignored for the lossless formats'),
+  },
+  async ({ txd, png, name, format, mipmaps, mask, replace, quality }) => {
+    try {
+      ensureRoot();
+      if (!txd) return { content: [{ type: "text" as const, text: 'Error: pass txd (the dictionary to import into)' }], isError: true };
+      const loaded = await txdEditor.loadPng(png);
+      const textureName = (name || png.replace(/\\/g, '/').split('/').pop()!.replace(/\.[a-z0-9]+$/i, '')).trim();
+      const importOptions: TxdImportOptions & { replace?: boolean } = {
+        name: textureName,
+        image: loaded.image,
+        format: format as any,
+        mipmaps: mipmaps as any,
+        mask,
+        replace: replace !== false,
+        quality: quality as any,
+      };
+      const result = await txdEditor.importTexture(txd, importOptions);
+      const entry = result.workspace.textures.find((t) => t.name === textureName)!;
+      const summary = [
+        `${result.replaced ? 'Replaced' : 'Imported'} "${entry.name}" from ${loaded.file}`,
+        `  ${entry.width}x${entry.height} ${entry.format}, ${entry.levels} level(s), ${entry.bytes} section bytes${entry.format.startsWith('DXT') ? `, DXT quality ${entry.quality}` : ''}`,
+        formatTxdWorkspace(result.workspace),
+        'Run txd_save to write the dictionary (nothing on disk changed yet).',
+      ];
+      return { content: [{ type: "text" as const, text: summary.join('\n') }, { type: "text" as const, text: JSON.stringify(result.workspace, null, 2) }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "txd_texture",
+  "Edit one texture of an open dictionary: rename (patches the char[32] name field, and works even for rasters samp-mcp cannot decode), duplicate, remove, or convert to another raster format with an optional mip chain. Conversions decode the first mip level, re-encode it and invalidate the old raster (DXT targets use the high-quality squish-style encoder unless quality=fast); nothing is written to disk until txd_save.",
+  {
+    txd: z.string().optional().describe('Open dictionary id/path (or a .txd path to open on the fly)'),
+    action: z.enum(["rename", "duplicate", "remove", "convert"]).describe('What to do with the texture'),
+    texture: z.string().describe('Texture to edit (exact name, case-insensitive)'),
+    name: z.string().optional().describe('New name for rename/duplicate (default <name>_copy)'),
+    format: z.enum(["8888", "888", "565", "555", "4444", "LUM8", "DXT1", "DXT3", "DXT5"]).optional().describe('Target raster format for convert'),
+    mipmaps: z.union([z.number(), z.enum(["full", "keep"])]).optional().describe('Mip levels for convert (default keep: the level count the texture already has)'),
+    quality: z.enum(["high", "fast"]).optional().describe('DXT block-compression effort for convert (default high: cluster fit + least-squares endpoint refinement; fast = single range fit)'),
+  },
+  async ({ txd, action, texture, name, format, mipmaps, quality }) => {
+    try {
+      ensureRoot();
+      if (!txd) return { content: [{ type: "text" as const, text: 'Error: pass txd (the dictionary to edit)' }], isError: true };
+      const result = await txdEditor.editTexture(txd, action, {
+        texture,
+        name,
+        format: format as any,
+        mipmaps: mipmaps as any,
+        quality: quality as any,
+      });
+      return {
+        content: [
+          { type: "text" as const, text: `${result.message} in ${result.workspace.id}\n${formatTxdWorkspace(result.workspace)}\nRun txd_save to write the dictionary.` },
+          { type: "text" as const, text: JSON.stringify(result.workspace, null, 2) },
+        ],
+      };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "txd_export_texture",
+  "Decode the textures of an open dictionary — including imports that were not saved yet — into PNG files, so a sprite or 0.3.DL texture can be checked in an image viewer or edited in a paint tool before or after it is written back.",
+  {
+    txd: z.string().optional().describe('Open dictionary id/path (or a .txd path to open on the fly)'),
+    texture: z.string().optional().describe('One texture to export (default: every texture of the dictionary)'),
+    out: z.string().optional().describe('Output directory (default .samp-mcp/txd-export/<dictionary>)'),
+  },
+  async ({ txd, texture, out }) => {
+    try {
+      ensureRoot();
+      if (!txd) return { content: [{ type: "text" as const, text: 'Error: pass txd (the dictionary to export from)' }], isError: true };
+      const result: TxdExportResult = await txdEditor.exportTexture(txd, { texture, out });
+      const lines = [
+        `Exported ${result.files.length} texture(s) of ${result.dictionary}`,
+        ...result.files.map((f) => `  ${f.name} — ${f.width}x${f.height} ${f.format} ${f.levels} level(s) → ${f.file}`),
+      ];
+      if (result.missing.length) lines.push(`Without decodable pixels: ${result.missing.join(', ')}`);
+      return { content: [{ type: "text" as const, text: lines.join('\n') }, { type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "txd_save",
+  "Write an edited dictionary back to disk: to its own file (a .bak copy is made first), to a new .txd (out), or into a VER2 .img archive (img + entry — rewritten in place, or appended when it needs more sectors, and never touching the other entries). The written bytes are parsed back before the result is reported. With discard=true the workspace is dropped without saving.",
+  {
+    txd: z.string().optional().describe('Open dictionary id/path (or a .txd path to open on the fly)'),
+    out: z.string().optional().describe('Write to this .txd path instead of the file the dictionary came from'),
+    img: z.string().optional().describe('Write into this VER2 .img archive instead'),
+    entry: z.string().optional().describe('The archive entry to replace (default: the entry the dictionary was opened from)'),
+    backup: z.boolean().optional().describe('Copy the previous file to <file>.bak first (default true)'),
+    discard: z.boolean().optional().describe('Throw the workspace away instead of saving it'),
+  },
+  async ({ txd, out, img, entry, backup, discard }) => {
+    try {
+      ensureRoot();
+      if (!txd) return { content: [{ type: "text" as const, text: 'Error: pass txd (the dictionary to save)' }], isError: true };
+      if (discard) {
+        const message = txdEditor.discard(txd);
+        return { content: [{ type: "text" as const, text: message }] };
+      }
+      const result: TxdSaveResult = await txdEditor.save(txd, { out, img, entry, backup: backup !== false });
+      const lines = result.target === 'img'
+        ? [
+          `Wrote ${result.textures} texture(s) into ${result.file} (entry ${entry ?? 'as opened'}, ${result.bytes} bytes, sector ${result.sector}, ${result.sectors} sectors, ${result.mode})`,
+        ]
+        : [
+          `Saved ${result.file} — ${result.textures} texture(s), ${result.bytes} bytes${result.backup ? `, previous file copied to ${result.backup}` : ''}`,
+        ];
+      if (result.warnings.length) lines.push(...result.warnings.map((w) => `Note: ${w}`));
+      lines.push('Run txd_scan (and textdraw_preview/model_preview) to refresh anything that renders these textures.');
+      return { content: [{ type: "text" as const, text: lines.join('\n') }, { type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (error: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+    }
+  }
+);
+
+/** One dictionary as the txd_* tools report it: a header plus one line per texture. */
+function formatTxdWorkspace(workspace: TxdWorkspaceInfo): string {
+  const lines = [
+    `${workspace.id} — ${workspace.textures.length} texture(s), ${workspace.version}, device id ${workspace.deviceId}`,
+    `  on disk ${workspace.sourceBytes} bytes${workspace.outputBytes === workspace.sourceBytes ? ' (saving changes nothing)' : `, ${workspace.outputBytes} bytes if saved now`}${workspace.dirty ? ' · UNSAVED changes' : ''}`,
+  ];
+  for (const texture of workspace.textures as TxdTextureInfo[]) {
+    const size = texture.width > 0 ? `${texture.width}x${texture.height}` : '    ?    ';
+    const dxt = texture.format.startsWith('DXT') ? `, ${texture.quality} quality` : '';
+    lines.push(`  ${texture.name} — ${size} ${texture.format}${dxt}, ${texture.levels} level(s), ${texture.bytes} B${texture.dirty ? ' (edited)' : ''}${texture.error ? ` · ${texture.error}` : ''}`);
+  }
+  if (workspace.notes.length) lines.push(...workspace.notes.map((note) => `Note: ${note}`));
+  return lines.join('\n');
+}
+
 /** 0xRRGGBBAA / #RRGGBB(AA) → RGBA byte tuple for the model renderer. */
 function parseBackground(value: string): [number, number, number, number] | null {
   const trimmed = value.trim();
@@ -1542,7 +1738,7 @@ GUIDELINES:
 2. For ALL file reads/writes/edits on .pwn/.inc/.cfg/logs, use samp-mcp's file_* tools (file_read/file_write/file_edit/file_grep — delegated to encoding-aware mcp-file-tools) — never plain editors that would corrupt Windows-874 Thai.
 3. Use the 'aaa_mandatory_read_first_guidelines' tool to see the full project rules.
 4. Keep the original language — do NOT translate existing strings.${p.hasSystemModules ? `\n5. When building NEW systems/features, follow the project's module pattern: ONE module under gamemodes/includes/system (use generate_boilerplate type=module/job/autofarm and design_feature, which now emit module-aware plans), register it in gamemodes/main.pwn, and never put gameplay logic in main.pwn.` : ''}
-5. HUD/UI work goes through the textdraw editor: textdraw_create / textdraw_update / textdraw_import keep the design in a project file, textdraw_preview shows it on a web page (serve=true = draggable, saveable editor, drag a model preview to orbit it), txd_scan decodes .txd dictionaries for font 4 sprites, model_scan/model_preview/model_export handle the 3D side (loose .dff/.txd, .img archives, font 5 previews), textdraw_export emits the Pawn code (mode=module for a system module).`
+5. HUD/UI work goes through the textdraw editor: textdraw_create / textdraw_update / textdraw_import keep the design in a project file, textdraw_preview shows it on a web page (serve=true = draggable, saveable editor, drag a model preview to orbit it), txd_scan decodes .txd dictionaries for font 4 sprites, model_scan/model_preview/model_export handle the 3D side (loose .dff/.txd, .img archives, font 5 previews), textdraw_export emits the Pawn code (mode=module for a system module). Custom textures are built with the TXD editor: txd_open / txd_import_texture / txd_texture / txd_export_texture / txd_save edit a .txd (or a dictionary inside a .img) in place.`
         }
       }]
     };

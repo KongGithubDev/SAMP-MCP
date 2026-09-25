@@ -1,7 +1,10 @@
 import { deflateSync, inflateSync } from 'node:zlib';
 
 /**
- * Minimal RenderWare TXD (texture dictionary) reader.
+ * RenderWare TXD (texture dictionary) reader — and the shared low-level pieces
+ * the writer (src/txd-write.ts) and the editable workspace (src/txd-edit.ts)
+ * build on: the section walker, the per-format raster byte sizes and the format
+ * table. `txd.ts` itself only reads.
  *
  * SA-MP textdraws show images through two mechanisms, and both are nicer to
  * design when the texture data can be seen outside the game:
@@ -20,10 +23,10 @@ import { deflateSync, inflateSync } from 'node:zlib';
  * "Raster (RW Section)" documentation.
  */
 
-const CHUNK_STRUCT = 0x01;
-const CHUNK_EXTENSION = 0x03;
-const CHUNK_TEXTURENATIVE = 0x15;
-const CHUNK_TEXDICTIONARY = 0x16;
+export const CHUNK_STRUCT = 0x01;
+export const CHUNK_EXTENSION = 0x03;
+export const CHUNK_TEXTURENATIVE = 0x15;
+export const CHUNK_TEXDICTIONARY = 0x16;
 
 const D3DFMT_DXT1 = 0x31545844; // 'DXT1'
 const D3DFMT_DXT2 = 0x32545844;
@@ -31,8 +34,11 @@ const D3DFMT_DXT3 = 0x33545844;
 const D3DFMT_DXT4 = 0x34545844;
 const D3DFMT_DXT5 = 0x35545844;
 
-type TxdPixelFormat =
+export type TxdPixelFormat =
   | '8888' | '888' | '565' | '555' | '4444' | 'LUM8' | 'PAL8' | 'DXT1' | 'DXT3' | 'DXT5' | 'unknown';
+
+/** Every raster format the writer can encode (PAL8 needs quantisation, so it stays read-only). */
+export type TxdWriteFormat = Exclude<TxdPixelFormat, 'PAL8' | 'unknown'>;
 
 export interface TxdTexture {
   name: string;
@@ -48,8 +54,18 @@ export interface TxdTexture {
   compressed: boolean;
   /** Bytes of the first mip level (what the decoder reads). */
   dataSize: number;
-  /** Bytes of the whole raster including mip levels (0 when the writer omits it). */
+  /**
+   * The u32 at header +88. Real SA dictionaries store the *first mip level's*
+   * byte length here (8.7 MB rasters report 6.5 MB for 1280x1280 8888 with 11
+   * levels), so it is metadata, not the raster size — the levels themselves are
+   * self-delimiting: level 0 follows the header, every later level is preceded
+   * by its own u32 byte length (verified against Magic.TXD-written files).
+   */
   rasterBytes: number;
+  /** platformId from the textureNative struct: 9 = Direct3D 9, 8 = Direct3D 8. */
+  platform: number;
+  /** filterMode/addressing u32 from the textureNative struct (e.g. 0x1102, 0x1106 for mipmapped). */
+  filterMode: number;
   decodable: boolean;
   decodeError?: string;
 }
@@ -80,6 +96,14 @@ interface RwChunk {
   end: number;
 }
 
+/** One section inside a file: `start` is the chunk header, `end` the byte after its payload. */
+interface TxdSection {
+  type: number;
+  /** Byte the chunk header starts at (chunk header + payload = [start, end)). */
+  start: number;
+  end: number;
+}
+
 interface NativeTexture {
   texture: TxdTexture;
   dataOffset: number | null;
@@ -106,6 +130,22 @@ function readChunks(buf: Buffer, start: number, end: number): RwChunk[] {
     off += total;
   }
   return chunks;
+}
+
+/**
+ * The child sections of a dictionary, in file order — this is what the editor
+ * uses to slice untouched textureNative chunks back out of a file verbatim, so
+ * textures it cannot decode (Direct3D 8, paletted rasters, ...) survive a save
+ * byte for byte.
+ */
+export function readTxdSections(buffer: Buffer): TxdSection[] {
+  if (buffer.length < 12 || buffer.readUInt32LE(0) !== CHUNK_TEXDICTIONARY) return [];
+  const end = Math.min(buffer.readUInt32LE(4) + 12, buffer.length);
+  return readChunks(buffer, 12, end).map((chunk) => ({
+    type: chunk.type,
+    start: chunk.end - chunk.size,
+    end: chunk.end,
+  }));
 }
 
 function readCString(buf: Buffer, offset: number, length: number): string {
@@ -171,7 +211,7 @@ function detectFormat(rasterFormat: number, d3dFormat: number, compressed: boole
   }
 }
 
-function mipLevelSize(format: TxdPixelFormat, width: number, height: number): number {
+export function rasterLevelBytes(format: TxdPixelFormat, width: number, height: number): number {
   const blocks = Math.max(1, (width + 3) >> 2) * Math.max(1, (height + 3) >> 2);
   switch (format) {
     case 'DXT1': return blocks * 8;
@@ -181,10 +221,11 @@ function mipLevelSize(format: TxdPixelFormat, width: number, height: number): nu
     case '888': return width * height * 4;
     case '565':
     case '555':
-    case '4444': return width * height * 2;
+    case '4444':
+      // Direct3D rasters are pitched to 4 bytes, which matters for odd widths.
+      return ((width * 2 + 3) & ~3) * height;
     case 'LUM8':
     case 'PAL8':
-      // Direct3D raster rows are 4-byte aligned.
       return ((width + 3) & ~3) * height;
     default: return 0;
   }
@@ -201,7 +242,75 @@ function bytesPerPixel(format: TxdPixelFormat): number {
   }
 }
 
-/** TextureNative structs are 96 bytes on Direct3D 9 (GTA SA) and 88 on Direct3D 8. */
+function isCompressedRasterFormat(format: TxdPixelFormat): boolean {
+  return format === 'DXT1' || format === 'DXT3' || format === 'DXT5';
+}
+
+/**
+ * Bytes one raster occupies, mip levels included: level 0 follows the header
+ * directly and every later level is preceded by its own u32 byte length.
+ * Returns -1 for formats whose size cannot be computed.
+ */
+function rasterTotalBytes(format: TxdPixelFormat, width: number, height: number, levels: number): number {
+  let sum = 0;
+  for (let i = 0; i < levels; i++) {
+    const size = rasterLevelBytes(format, Math.max(1, width >> i), Math.max(1, height >> i));
+    if (size <= 0) return -1;
+    sum += size + (i > 0 ? 4 : 0);
+  }
+  return sum;
+}
+
+/**
+ * Works out the raster format, the header size (92 bytes, and 88 only on the
+ * older style of Direct3D 8 section) and the level-0 byte length of one
+ * textureNative struct.
+ *
+ * Rows in the wild are never padded, so a candidate layout is accepted when
+ * header + raster bytes equal the struct payload exactly. That matters for two
+ * real quirks:
+ *
+ *  - Direct3D 8 sections carry no D3D FourCC, so a compressed raster is only
+ *    recognisable from its size. Legacy GTA III/VC-era dictionaries store DXT1
+ *    as rasterFormat 0x0200 with flags 0x01 and no compression bit at all
+ *    (models/misc.txd: 11 wheels whose 64x64 rasters are exactly 2048 DXT1
+ *    bytes), and today they decode as nothing at all,
+ *  - those same files may still use the 92-byte D3D9 header, which is why the
+ *    header size is part of the layout search instead of being assumed.
+ *
+ * When nothing matches exactly the previously detected format and the standard
+ * header size are kept, so unusual-but-readable dictionaries do not regress.
+ */
+function resolveRasterLayout(opts: {
+  payload: number;
+  width: number;
+  height: number;
+  numLevels: number;
+  rasterFormat: number;
+  d3dFormat: number;
+  compressed: boolean;
+  isD3D9: boolean;
+}): { format: TxdPixelFormat; headerSize: number; dataSize: number } {
+  const detected = detectFormat(opts.rasterFormat, opts.d3dFormat, opts.compressed);
+  const fallback = { format: detected, headerSize: opts.isD3D9 ? 92 : 88 };
+  const candidates: TxdPixelFormat[] = [detected];
+  if (!opts.compressed && !isCompressedRasterFormat(detected)) {
+    candidates.push('DXT1', 'DXT3', 'DXT5');
+  }
+  const headerSizes = opts.isD3D9 ? [92] : [92, 88];
+  for (const format of candidates) {
+    const total = rasterTotalBytes(format, opts.width, opts.height, opts.numLevels);
+    if (total <= 0) continue;
+    for (const headerSize of headerSizes) {
+      if (headerSize + total === opts.payload) {
+        return { format, headerSize, dataSize: rasterLevelBytes(format, opts.width, opts.height) };
+      }
+    }
+  }
+  return { ...fallback, dataSize: rasterLevelBytes(fallback.format, opts.width, opts.height) };
+}
+
+/** TextureNative structs are 92 bytes on Direct3D 9 (GTA SA) and usually 92 as well on PC Direct3D 8. */
 function parseTextureNative(buf: Buffer, chunk: RwChunk): NativeTexture | null {
   const children = readChunks(buf, chunk.dataStart, chunk.end);
   const structs = children.filter((c) => c.type === CHUNK_STRUCT);
@@ -229,6 +338,8 @@ function parseTextureNative(buf: Buffer, chunk: RwChunk): NativeTexture | null {
       compressed: false,
       dataSize: 0,
       rasterBytes: 0,
+      platform,
+      filterMode: 0,
       decodable: false,
       decodeError: `unsupported platform id ${platform} (only PC Direct3D 8/9 dictionaries can be decoded)`,
     };
@@ -244,36 +355,32 @@ function parseTextureNative(buf: Buffer, chunk: RwChunk): NativeTexture | null {
   // dictionaries (background.txd, models/fonts.txd, models/generic/vehicle.txd):
   //   +80 u16 width, +82 u16 height, +84 u8 depth, +85 u8 numLevels,
   //   +86 u8 rasterType, +87 u8 flags (0x01 hasAlpha, 0x08 compressed),
-  //   +88 u32 raster bytes (all mip levels), data starts at +92 (D3D9) / +88 (D3D8).
-  let width: number;
-  let height: number;
-  let depth: number;
-  let numLevels: number;
-
+  //   +88 u32 raster bytes, data starts at +92.
   const flags = buf.readUInt8(p + 87);
-  const compressed = (flags & 0x08) !== 0;
+  const compressedFlag = (flags & 0x08) !== 0;
   let hasAlpha = (flags & 0x01) !== 0;
-  let rasterBytes = 0;
-  let headerSize: number;
 
-  if (isD3D9) {
-    width = buf.readUInt16LE(p + 80);
-    height = buf.readUInt16LE(p + 82);
-    depth = buf.readUInt8(p + 84);
-    numLevels = buf.readUInt8(p + 85);
-    rasterBytes = p + 92 <= chunk.end ? buf.readUInt32LE(p + 88) : 0;
-    headerSize = 92;
-  } else {
-    width = buf.readUInt16LE(p + 80);
-    height = buf.readUInt16LE(p + 82);
-    depth = buf.readUInt8(p + 84);
-    numLevels = buf.readUInt8(p + 85);
-    headerSize = 88;
-  }
+  const width = buf.readUInt16LE(p + 80);
+  const height = buf.readUInt16LE(p + 82);
+  const depth = buf.readUInt8(p + 84);
+  const numLevels = buf.readUInt8(p + 85);
 
-  const format = detectFormat(rasterFormat, d3dFormat, compressed);
+  const rasterLayout = resolveRasterLayout({
+    payload: header.end - header.dataStart,
+    width,
+    height,
+    numLevels: Math.max(1, numLevels),
+    rasterFormat,
+    d3dFormat,
+    compressed: compressedFlag,
+    isD3D9,
+  });
+  const format = rasterLayout.format;
+  const headerSize = rasterLayout.headerSize;
+  const dataSize = rasterLayout.dataSize;
+  const compressed = compressedFlag || isCompressedRasterFormat(format);
+  const rasterBytes = headerSize === 92 && p + 92 <= chunk.end ? buf.readUInt32LE(p + 88) : 0;
   if (!hasAlpha && (format === '8888' || format === '4444' || format === 'DXT3' || format === 'DXT5')) hasAlpha = true;
-  const dataSize = mipLevelSize(format, width, height);
   const texture: TxdTexture = {
     name: name || '(unnamed)',
     mask,
@@ -288,6 +395,8 @@ function parseTextureNative(buf: Buffer, chunk: RwChunk): NativeTexture | null {
     compressed,
     dataSize,
     rasterBytes,
+    platform,
+    filterMode: buf.readUInt32LE(p + 4),
     decodable: false,
   };
 
@@ -399,6 +508,8 @@ export function parseTxd(buffer: Buffer, file: string): TxdDictionary {
         compressed: false,
         dataSize: 0,
         rasterBytes: 0,
+        platform: 0,
+        filterMode: 0,
         decodable: false,
         decodeError: error.message,
       });
@@ -416,7 +527,12 @@ function expand5(v: number): number { return (v << 3) | (v >> 2); }
 function expand6(v: number): number { return (v << 2) | (v >> 4); }
 function expand4(v: number): number { return (v << 4) | v; }
 
-function dxtColorTable(c0: number, c1: number): number[][] {
+/**
+ * The four RGBA entries a DXT colour block can address. The writer encodes with
+ * this exact table (and its complement dxtAlphaTable below), so an encoded block
+ * always decodes back to the colours the encoder picked.
+ */
+export function dxtColorTable(c0: number, c1: number, alwaysFourColors = false): number[][] {
   const r0 = expand5((c0 >> 11) & 0x1f);
   const g0 = expand6((c0 >> 5) & 0x3f);
   const b0 = expand5(c0 & 0x1f);
@@ -427,7 +543,9 @@ function dxtColorTable(c0: number, c1: number): number[][] {
     [r0, g0, b0, 255],
     [r1, g1, b1, 255],
   ];
-  if (c0 > c1) {
+  // DXT2/3/4/5 always interpolate four opaque colours; only DXT1 falls back to
+  // the three-colour + transparent mode when the endpoints are not ordered.
+  if (alwaysFourColors || c0 > c1) {
     table[2] = [((2 * r0 + r1) / 3) | 0, ((2 * g0 + g1) / 3) | 0, ((2 * b0 + b1) / 3) | 0, 255];
     table[3] = [((r0 + 2 * r1) / 3) | 0, ((g0 + 2 * g1) / 3) | 0, ((b0 + 2 * b1) / 3) | 0, 255];
   } else {
@@ -437,11 +555,30 @@ function dxtColorTable(c0: number, c1: number): number[][] {
   return table;
 }
 
+/** The eight alpha values a DXT5 alpha block can address (a0 > a1 = 8-value mode). */
+export function dxtAlphaTable(a0: number, a1: number): number[] {
+  const table = [a0, a1];
+  if (a0 > a1) {
+    for (let i = 1; i <= 6; i++) table.push((((7 - i) * a0 + i * a1) / 7) | 0);
+  } else {
+    for (let i = 1; i <= 4; i++) table.push((((5 - i) * a0 + i * a1) / 5) | 0);
+    table.push(0);
+    table.push(255);
+  }
+  return table;
+}
+
+/** Reads one 3-bit index out of the DXT5 alpha block's 48 index bits. */
+function dxtAlphaIndex(bits: number, pixel: number): number {
+  return Math.floor(bits / 2 ** (3 * pixel)) & 0x07;
+}
+
 function decodeDxt(buf: Buffer, offset: number, format: TxdPixelFormat, width: number, height: number): DecodedTexture {
   const rgba = Buffer.alloc(width * height * 4);
   const blocksX = Math.max(1, (width + 3) >> 2);
   const blocksY = Math.max(1, (height + 3) >> 2);
   const blockBytes = format === 'DXT1' ? 8 : 16;
+  const alwaysFourColors = format === 'DXT3' || format === 'DXT5';
   let off = offset;
 
   for (let by = 0; by < blocksY; by++) {
@@ -457,23 +594,16 @@ function decodeDxt(buf: Buffer, offset: number, format: TxdPixelFormat, width: n
         for (let i = 0; i < 16; i++) alpha.push(expand4((block[i >> 1] >> ((i & 1) * 4)) & 0x0f));
       } else if (format === 'DXT5') {
         colorBlock = block.subarray(8);
-        const a0 = block[0];
-        const a1 = block[1];
-        const table = [a0, a1];
-        if (a0 > a1) {
-          for (let i = 1; i <= 6; i++) table.push((((7 - i) * a0 + i * a1) / 7) | 0);
-        } else {
-          for (let i = 1; i <= 4; i++) table.push((((5 - i) * a0 + i * a1) / 5) | 0);
-          table.push(0);
-          table.push(255);
-        }
+        const table = dxtAlphaTable(block[0], block[1]);
+        // 48 index bits do not fit an int32: shifting by 3 * 11 would wrap the
+        // shift count and read the wrong 3-bit field, so accumulate exactly.
         let bits = 0;
-        for (let i = 0; i < 6; i++) bits |= block[2 + i] << (8 * i);
+        for (let i = 0; i < 6; i++) bits += block[2 + i] * 2 ** (8 * i);
         alpha = [];
-        for (let i = 0; i < 16; i++) alpha.push(table[(bits >>> (3 * i)) & 0x07]);
+        for (let i = 0; i < 16; i++) alpha.push(table[dxtAlphaIndex(bits, i)]);
       }
 
-      const table = dxtColorTable(colorBlock.readUInt16LE(0), colorBlock.readUInt16LE(2));
+      const table = dxtColorTable(colorBlock.readUInt16LE(0), colorBlock.readUInt16LE(2), alwaysFourColors);
       const indices = colorBlock.readUInt32LE(4);
 
       for (let y = 0; y < 4; y++) {
@@ -610,18 +740,52 @@ function decodeNative(buf: Buffer, native: NativeTexture): DecodedTexture | null
   );
 }
 
-/** Decodes the first mip level of one named texture out of a TXD buffer. */
+/**
+ * Decodes the first mip level of the nth textureNative section (file order).
+ * Name lookups go through decodeTxdTexture below; this one is what the editor
+ * uses, so dictionaries with names that prefix each other (ITEM_1 / ITEM_10)
+ * still decode the texture that was actually asked for.
+ */
+export function decodeTxdTextureAt(buffer: Buffer, index: number): DecodedTexture | null {
+  if (buffer.length < 12 || buffer.readUInt32LE(0) !== CHUNK_TEXDICTIONARY) return null;
+  const size = Math.min(buffer.readUInt32LE(4) + 12, buffer.length);
+  let at = 0;
+  for (const child of readChunks(buffer, 12, size)) {
+    if (child.type !== CHUNK_TEXTURENATIVE) continue;
+    if (at++ !== index) continue;
+    const native = parseTextureNative(buffer, child);
+    return native ? decodeNative(buffer, native) : null;
+  }
+  return null;
+}
+
+/**
+ * Decodes the first mip level of one named texture out of a TXD buffer.
+ *
+ * An exact name always wins over a prefix match: real dictionaries contain
+ * names that prefix each other (item_2 / item_20 / item_201, loadsc1 / loadsc10),
+ * and returning the first *prefix* the file happens to hold showed the wrong
+ * sprite. Prefix matching itself stays, because a game may ask for a shortened
+ * name and GTA resolves it the same way.
+ */
 export function decodeTxdTexture(buffer: Buffer, textureName: string): DecodedTexture | null {
   if (buffer.length < 12 || buffer.readUInt32LE(0) !== CHUNK_TEXDICTIONARY) return null;
   const size = Math.min(buffer.readUInt32LE(4) + 12, buffer.length);
+  const wanted = textureName.toLowerCase();
+  let prefixed: NativeTexture | null = null;
   for (const child of readChunks(buffer, 12, size)) {
     if (child.type !== CHUNK_TEXTURENATIVE) continue;
     const native = parseTextureNative(buffer, child);
-    if (!native || !native.texture.name.toLowerCase().startsWith(textureName.toLowerCase())) continue;
-    const decoded = decodeNative(buffer, native);
-    if (decoded) return decoded;
+    if (!native) continue;
+    const name = native.texture.name.toLowerCase();
+    if (name === wanted) {
+      const decoded = decodeNative(buffer, native);
+      if (decoded) return decoded;
+    } else if (!prefixed && name.startsWith(wanted)) {
+      prefixed = native;
+    }
   }
-  return null;
+  return prefixed ? decodeNative(buffer, prefixed) : null;
 }
 
 // ---------------------------------------------------------------------------
