@@ -22,8 +22,7 @@
  * Run: node scripts/txd-demo.mjs   (after `npm run build`)
  * Exit code is non-zero when any expectation fails.
  */
-import { mkdir, rm, writeFile, readFile } from 'node:fs/promises';
-import { glob } from 'node:fs/promises';
+import { mkdir, readdir, rm, writeFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { TxdEditorManager } from '../dist/txd-edit.js';
@@ -55,6 +54,22 @@ function check(label, condition, detail = '') {
   }
 }
 const rel = (file) => path.relative(root, file).split(path.sep).join('/');
+
+/** Recursive file walk. `fs.promises.glob` would be shorter but needs Node 22; CI runs Node 20. */
+async function findFiles(dir, extension, found = []) {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return found; // no game assets on this machine
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) await findFiles(full, extension, found);
+    else if (entry.isFile() && entry.name.toLowerCase().endsWith(extension)) found.push(full);
+  }
+  return found;
+}
 
 /** 32x32 image: smooth colour gradient, smooth alpha ramp, translucency in a corner. */
 function sourceImage(size = 32, hardAlpha = false) {
@@ -243,11 +258,8 @@ async function main() {
   }
 
   console.log('\n3. rebuild real GTA: SA dictionaries from their own pixels (byte for byte)');
-  const samples = [];
   const sampleRoot = process.env.SAMP_TXD_SAMPLE_DIR || 'D:/GTASAN Muntiplayer';
-  try {
-    for await (const file of glob(`${sampleRoot}/**/*.txd`)) samples.push(file);
-  } catch { /* no game assets on this machine */ }
+  const samples = await findFiles(sampleRoot, '.txd');
   let rebuiltFiles = 0;
   let sampleTextures = 0;
   if (samples.length === 0) {

@@ -24,7 +24,7 @@
  * plus real textures decoded from the game's own dictionaries when present.
  * Run: node scripts/txd-dxt-quality.mjs   (after `npm run build`)
  */
-import { glob, readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { buildTxdBuffer } from '../dist/txd-write.js';
@@ -45,6 +45,22 @@ function check(label, condition, detail = '') {
     failures.push(label + (detail ? ` — ${detail}` : ''));
     console.log(`  FAIL ${label}${detail ? ` — ${detail}` : ''}`);
   }
+}
+
+/** Recursive file walk. `fs.promises.glob` would be shorter but needs Node 22; CI runs Node 20. */
+async function findFiles(dir, extension, found = []) {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return found; // no game assets on this machine
+  }
+  for (const entry of entries) {
+    const full = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) await findFiles(full, extension, found);
+    else if (entry.isFile() && entry.name.toLowerCase().endsWith(extension)) found.push(full);
+  }
+  return found;
 }
 
 /** Deterministic 32-bit LCG so the "photo" images are the same on every machine. */
@@ -507,12 +523,7 @@ function deviation(image) {
 /** Real dictionaries hold the textures the game itself compressed — good test material. */
 async function realImages() {
   const sampleRoot = process.env.SAMP_TXD_SAMPLE_DIR || 'D:/GTASAN Muntiplayer';
-  const files = [];
-  try {
-    for await (const file of glob(`${sampleRoot}/**/*.txd`)) files.push(file);
-  } catch {
-    return []; // no game assets on this machine
-  }
+  const files = await findFiles(sampleRoot, '.txd');
   const images = [];
   for (const file of files.sort()) {
     if (images.length >= MAX_REAL_IMAGES) break;
