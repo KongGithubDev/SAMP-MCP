@@ -22,7 +22,7 @@ import { models } from './model.js';
 process.env.DOTENV_CONFIG_QUIET = 'true';
 dotenv.config({ quiet: true });
 
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.0.13";
 
 const server = new McpServer({
   name: "samp-mcp-server",

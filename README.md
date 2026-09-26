@@ -4,7 +4,7 @@
 
 **A comprehensive MCP server for SA-MP server development and management**
 
-[![GitHub Packages](https://img.shields.io/badge/package-GitHub%20Packages-24292e.svg?logo=github)](https://github.com/KongGithubDev/SAMP-MCP/pkgs/npm/samp-mcp)
+[![npm](https://img.shields.io/npm/v/samp-mcp.svg)](https://www.npmjs.com/package/samp-mcp)
 [![license](https://img.shields.io/github/license/KongGithubDev/SAMP-MCP.svg)](LICENSE)
 
 Manage, script, and audit SA-MP servers with AI assistance.
@@ -16,17 +16,14 @@ Manage, script, and audit SA-MP servers with AI assistance.
 ## Installation
 
 ```sh
-npm install -g @konggithubdev/samp-mcp
+npm install -g samp-mcp
 # or
-yarn global add @konggithubdev/samp-mcp
+yarn global add samp-mcp
 ```
 
-The package is published to **GitHub Packages**, so installs and updates require authentication — create a personal access token (classic) with `read:packages` scope and add it to `~/.npmrc`:
+The package is published to the public **npm registry** as [`samp-mcp`](https://www.npmjs.com/package/samp-mcp) — no token and no `~/.npmrc` setup are required.
 
-```
-//npm.pkg.github.com/:_authToken=TOKEN
-@konggithubdev:registry=https://npm.pkg.github.com
-```
+The npm releases up to **1.0.12** predate the Textdraw Editor, the 3D model preview and the TXD editor — those tools arrive with **1.0.13**. If a client shows no `textdraw_*` / `txd_*` / `model_*` tools, it is running a pre-editor build: a stale global install, or the old `@konggithubdev/samp-mcp` name that was published to GitHub Packages. Install `samp-mcp@latest`, re-approve the tool list, and restart the client.
 
 Requires **Node.js ≥ 18** and a functional **SA-MP server** directory.
 
@@ -37,22 +34,22 @@ File tools need the [mcp-file-tools](https://github.com/dimitar-grigorov/mcp-fil
 Already installed? Install the same package again — this always resolves the `latest` tag, so it is the most reliable way to update:
 
 ```sh
-npm install -g @konggithubdev/samp-mcp
+npm install -g samp-mcp
 # or
-yarn global add @konggithubdev/samp-mcp
+yarn global add samp-mcp
 ```
 
 npm's own update command works too, with one catch:
 
 ```sh
-npm update -g @konggithubdev/samp-mcp   # update within the installed major (1.2.0 -> 1.3.0)
+npm update -g samp-mcp                  # update within the installed major (1.0.12 -> 1.0.13)
 npm outdated -g --depth=0               # list every global package that is behind
-npm list -g @konggithubdev/samp-mcp     # the version you currently have
+npm list -g samp-mcp                    # the version you currently have
 ```
 
 `npm update -g` treats a global install as if it had been declared with a caret range (`^1.0.12`), so it never crosses a major version — reach for `npm install -g` when you want the latest regardless. Called without a package name, it updates **every** global package on the machine and downgrades anything that is ahead of `latest`, so keep it scoped to this package.
 
-The `~/.npmrc` setup above is required for updates exactly as it is for the first install: without the `@konggithubdev:registry` line npm looks for the package on npmjs.com and reports `404 Not Found`, and without the `//npm.pkg.github.com/:_authToken` line it reports `401 Unauthorized`. On Linux/macOS a global install fails with `EACCES` if the npm prefix is not writable — the usual fixes are a Node version manager (nvm) or npm's own prefix setting.
+A global install is per-Node, so switching Node versions (nvm, fnm) hides the package until you install it again. On Linux/macOS it also fails with `EACCES` if the npm prefix is not writable — the usual fixes are a Node version manager or npm's own prefix setting.
 
 **Restart your MCP client afterwards.** The running server keeps the old code in memory, so an open session keeps using the previous version until the client (Claude Desktop, Cursor, Windsurf, …) reconnects.
 
@@ -60,13 +57,13 @@ The server can also update itself from inside a session:
 
 | Tool | What it does |
 |---|---|
-| `check_for_updates` | Compares the running version with the latest one published to GitHub Packages (`npm view @konggithubdev/samp-mcp version --registry=https://npm.pkg.github.com`) |
+| `check_for_updates` | Compares the running version with the latest one published to npm (`npm view samp-mcp version --registry=https://registry.npmjs.org`) |
 | `update_mcp_server` | Runs the global install for you and asks you to restart the client |
 
 To see the version you currently have installed:
 
 ```sh
-npm list -g @konggithubdev/samp-mcp
+npm list -g samp-mcp
 ```
 
 ---
@@ -367,13 +364,15 @@ Individual gates:
 ### Releasing
 
 `npm publish` runs `npm run check` first (`prepublishOnly`), so a red gate blocks the release.
-`.github/workflows/publish.yml` publishes to GitHub Packages on any of these triggers:
+`.github/workflows/publish.yml` publishes to the public npm registry on any of these triggers:
 
 ```sh
-npm version 1.3.1 --no-git-tag-version && git commit -am "chore: release v1.3.1"
+npm version 1.0.13 --no-git-tag-version && git commit -am "chore: release v1.0.13"
 git push origin main
-git tag v1.3.1 && git push origin v1.3.1   # tag push -> workflow publishes
+git tag v1.0.13 && git push origin v1.0.13   # tag push -> workflow publishes
 ```
+
+The workflow authenticates with the **`NPM_TOKEN`** repository secret — an npm *automation* (or granular, publish-enabled) token belonging to the account that owns `samp-mcp` on npmjs.com. Without it the publish step fails with `401 Unauthorized` (the `npm ci` and build steps still pass).
 
 Publishing a GitHub Release, or running the workflow manually (`workflow_dispatch`), does the same thing.
 
